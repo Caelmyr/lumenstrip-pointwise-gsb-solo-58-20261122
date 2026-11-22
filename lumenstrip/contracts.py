@@ -190,6 +190,11 @@ class Capture:
                 "notes": self.notes, "synthetic": self.synthetic}
 
 
+TRACE_MODES = ("linear", "guided")
+_MODE_ALIASES = {"linear": "linear", "straight": "linear", "guided": "guided",
+                 "curve": "guided", "curved": "guided", "follow": "guided", "tracked": "guided"}
+
+
 @dataclass(frozen=True)
 class Strip:
     first: tuple[float, float]
@@ -203,27 +208,51 @@ class Strip:
     high_guard: float
     low_guard: float
     step: int
+    mode: str = "linear"
+    guides: tuple[tuple[float, float], ...] = ()
+    search: int = 6
+    margin: float = .82
 
     @classmethod
     def default(cls) -> Strip:
         return cls((.08, .53), (.92, .53), 5, 7, 4, "linear-luma", "median", True, .995, .002, 1)
 
+    @property
+    def controls(self) -> tuple[tuple[float, float], ...]:
+        """Sorted centre-line control points, including both ends."""
+        return tuple(sorted((self.first, *self.guides, self.last), key=lambda p: p[0]))
+
     @classmethod
     def parse(cls, value) -> Strip:
         data = mapping(value, "Strip")
-        allowed(data, {"endpoints", "half_height", "side_spacing", "side_height", "channel",
+        allowed(data, {"endpoints", "guides", "mode", "search", "margin",
+                       "half_height", "side_spacing", "side_height", "channel",
                        "level", "subtract_sides", "high_guard", "low_guard", "step"}, "strip")
         defaults = cls.default()
-        first, last = points(data.get("endpoints", [list(defaults.first), list(defaults.last)]),
-                             "Strip center anchors", 2, 2)
-        if first[0] > last[0]:
-            first, last = last, first
+        ends = points(data.get("endpoints", [list(defaults.first), list(defaults.last)]),
+                      "Strip centre path", 2, 16)
+        guides = tuple(point(v, f"Guide point {i + 1}") for i, v in
+                       enumerate(seq(data.get("guides", []), "Trace guide points", 0, 14)))
+        controls = sorted((*ends, *guides), key=lambda p: p[0])
+        if any(b[0] - a[0] < .0005 for a, b in zip(controls, controls[1:])):
+            raise Problem("Strip centre points must be distinct and ordered from left to right.")
+        first, last = controls[0], controls[-1]
         if last[0] - first[0] < .025:
             raise Problem("Separate the strip anchors horizontally.")
+        inner = tuple(p for p in controls if first[0] < p[0] < last[0])
+        if len(inner) > 14:
+            raise Problem("A guided strip accepts at most fourteen inner points.")
         low = real(data.get("low_guard", defaults.low_guard), "Shadow guard", 0, .9)
         high = real(data.get("high_guard", defaults.high_guard), "Clip guard", .1, 1)
         if high - low < .05:
             raise Problem("Separate the shadow and clip guards by at least 0.05.")
+        requested = data.get("mode")
+        if requested is None:
+            mode = "guided" if inner else defaults.mode
+        else:
+            mode = _MODE_ALIASES.get(requested)
+            if mode is None:
+                raise Problem(f"Trace path must be one of {', '.join(TRACE_MODES)}.")
         return cls(first, last,
                    whole(data.get("half_height", defaults.half_height), "Strip half height (px)", 0, 32),
                    whole(data.get("side_spacing", defaults.side_spacing), "Sideband gap (px)", 1, 80),
@@ -231,10 +260,16 @@ class Strip:
                    choice(data.get("channel", defaults.channel), CHANNELS, "Channel"),
                    choice(data.get("level", defaults.level), ("mean", "median"), "Estimator"),
                    flag(data.get("subtract_sides", defaults.subtract_sides), "Subtract sidebands"), high, low,
-                   whole(data.get("step", defaults.step), "Horizontal step (px)", 1, 16))
+                   whole(data.get("step", defaults.step), "Horizontal step (px)", 1, 16),
+                   mode, inner,
+                   whole(data.get("search", defaults.search), "Vertical trace search (px)", 0, 32),
+                   real(data.get("margin", defaults.margin), "Trace ambiguity ratio", .3, 1.))
 
     def public(self) -> dict:
-        return {"endpoints": [list(self.first), list(self.last)], "half_height": self.half_height,
+        return {"endpoints": [list(self.first), list(self.last)],
+                "guides": [list(p) for p in self.guides], "mode": self.mode,
+                "search": self.search, "margin": self.margin,
+                "half_height": self.half_height,
                 "side_spacing": self.side_spacing, "side_height": self.side_height,
                 "channel": self.channel, "level": self.level, "subtract_sides": self.subtract_sides,
                 "high_guard": self.high_guard, "low_guard": self.low_guard, "step": self.step}

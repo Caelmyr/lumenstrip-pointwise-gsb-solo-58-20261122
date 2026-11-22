@@ -16,7 +16,127 @@ DARK = 2
 CLIPPED = 3
 NO_BACKGROUND = 4
 NO_AXIS = 5
-STATUSES = ("measured", "no pixels", "below guard", "clipped", "missing sidebands", "unmapped")
+AMBIGUOUS = 6
+STATUSES = ("measured", "no pixels", "below guard", "clipped", "missing sidebands", "unmapped",
+            "trace uncertain")
+
+
+def _column_light(camera: Camera, x: np.ndarray, rows: np.ndarray, settings: Strip) -> np.ndarray:
+    """Linear channel values at native (column, row) pairs, including clipped rows."""
+    clipped = np.clip(rows, 0, camera.size[1] - 1)
+    encoded = camera.rgb[clipped, x[:, None], :]
+    values = channel_values(encoded, settings.channel)
+    inside = (rows >= 0) & (rows < camera.size[1])
+    return np.where(inside, values, np.nan)
+
+
+def _profiles(camera: Camera, settings: Strip, x: np.ndarray, base: np.ndarray):
+    """Per-column ridge strength across the rows the user's guide can reach.
+
+    Ridge detection uses a short three-row average, independent of the reading strip
+    height: it is asking where a line's centre is, not how tall the readout is.
+    """
+    search = settings.search
+    band = 3
+    pad = band // 2
+    offsets = np.arange(-(search + pad), search + pad + 1)
+    sampled = np.rint(base).astype(np.int32)[:, None] + offsets[None, :]
+    values = _column_light(camera, x, sampled, settings)
+    missing = np.nanmedian(values, axis=1)
+    missing = np.where(np.isfinite(missing), missing, 0.)
+    values = np.where(np.isfinite(values), values, missing[:, None])
+    cumulative = np.cumsum(np.pad(values, ((0, 0), (1, 0))), axis=1)
+    strength = (cumulative[:, band:] - cumulative[:, :-band]) / band
+    # Only the centre range that still has full smoothing support is a candidate row.
+    usable = (offsets[pad:pad + strength.shape[1]] >= -search) & \
+             (offsets[pad:pad + strength.shape[1]] <= search)
+    return strength[:, usable], offsets[pad:pad + strength.shape[1]][usable], band
+
+
+def _bridge_gaps(camera: Camera, settings: Strip, x: np.ndarray, base: np.ndarray):
+    """Follow the ridge nearest a user-marked centre line without changing branch.
+
+    The user marks points on one spectral band; between marks the guide is the straight
+    line through them. A column is read only from a ridge lying within ``search`` rows of
+    that guide, so a brighter neighbour outside that reach is never substituted, and a
+    merged or doubled bump (two lines that cannot be told apart) is reported as uncertain
+    and receives no signal rather than a made-up row.
+    """
+    height = camera.size[1]
+    width = camera.size[0]
+    search = settings.search
+    strength, offsets, band = _profiles(camera, settings, x, base)
+    if strength.shape[1] == 0:
+        return np.rint(base).astype(np.int32), np.zeros(len(x), dtype=bool)
+    peaks = np.zeros_like(strength, dtype=bool)
+    peaks[:, 1:-1] = (strength[:, 1:-1] >= strength[:, :-2]) & (strength[:, 1:-1] >= strength[:, 2:])
+    local_low = np.min(strength, axis=1)
+    local_high = np.max(strength, axis=1)
+    rise = np.maximum(0., local_high - local_low)
+    peaks &= strength >= local_low[:, None] + .28 * rise[:, None]
+    peaks &= rise[:, None] > 1e-9
+    separation = max(3, band)
+
+    controls = settings.controls
+    anchors = {}
+    for u, v in controls:
+        index = int(np.clip(np.searchsorted((x + .5) / width, u), 0, len(x) - 1))
+        anchors[index] = int(np.clip(round(v * height - .5), 0, height - 1))
+    anchors[0] = int(np.clip(round(controls[0][1] * height - .5), 0, height - 1))
+    anchors[len(x) - 1] = int(np.clip(round(controls[-1][1] * height - .5), 0, height - 1))
+
+    rows = np.rint(base).astype(np.int32)
+    confident = np.zeros(len(x), dtype=bool)
+    widths = np.zeros(len(x))
+    previous = anchors.get(0, int(rows[0]))
+    for i in range(len(x)):
+        if i in anchors:
+            previous = anchors[i]
+            rows[i] = previous
+            confident[i] = True
+            continue
+        candidates = [(int(round(base[i] + offsets[j])), float(strength[i, j]), j)
+                      for j in np.flatnonzero(peaks[i])]
+        if not candidates:
+            # The guide saw no line at all here; keep the nearest guess but publish nothing.
+            previous = int(np.clip(previous, base[i] - search, base[i] + search))
+            rows[i] = previous
+            continue
+        # Pick the ridge the user's own line points at. A rival that happens to be
+        # brighter is still a rival; it may not steal the reading.
+        closest = min(candidates, key=lambda c: (abs(c[0] - base[i]), -c[1]))
+        rows[i] = closest[0]
+        rivals = [c for c in candidates if abs(c[0] - closest[0]) >= separation]
+        confident[i] = bool(not rivals or rivals[0][1] < settings.margin * closest[1])
+        widths[i] = _fwhm(strength[i], closest[2])
+        previous = closest[0]
+
+    # A ridge noticeably wider than this strip's normal line is two lines merged into
+    # one bump, and its centre row names neither of them.
+    known = widths[confident & (widths > 0)]
+    reference = float(np.median(known)) if len(known) else 0.
+    if reference:
+        confident &= widths <= 1.3 * reference
+    # A lone doubtful column between two certain ones is not a line.
+    for i in np.flatnonzero(confident[1:-1]) + 1:
+        if not confident[i - 1] and not confident[i + 1]:
+            confident[i] = False
+    return rows, confident
+
+
+def _fwhm(profile: np.ndarray, peak: int) -> float:
+    """Width at half maximum of one ridge, as a count of sampled rows."""
+    height = float(profile[peak])
+    if height <= 0:
+        return 0.
+    half = .5 * height
+    left = peak
+    while left > 0 and profile[left - 1] >= half:
+        left -= 1
+    right = peak
+    while right < len(profile) - 1 and profile[right + 1] >= half:
+        right += 1
+    return float(right - left + 1)
 
 
 @dataclass(frozen=True)
@@ -27,24 +147,33 @@ class RegionPlan:
     adjacent: np.ndarray
     width: int
     height: int
+    base: np.ndarray
+    confident: np.ndarray
+    mode: str
+    controls: tuple[tuple[float, float], ...]
 
     @classmethod
     def make(cls, camera: Camera, settings: Strip) -> RegionPlan:
         w, h = camera.size
-        first, last = settings.first, settings.last
+        controls = settings.controls
+        first, last = controls[0], controls[-1]
         start = max(0, min(w - 1, int(np.ceil(first[0] * w - .5))))
         stop = max(0, min(w - 1, int(np.floor(last[0] * w - .5))))
         if stop - start < 5:
             raise Problem("The strip anchors span fewer than six native columns.")
         x = np.arange(start, stop + 1, settings.step, dtype=np.int32)
         ux = (x + .5) / w
-        center = (np.interp(ux, [first[0], last[0]], [first[1], last[1]]) * h -.5)
-        center = np.rint(center).astype(np.int32)
+        mid_y = np.interp(ux, [a for a, _ in controls], [b for _, b in controls])
+        base = np.rint(mid_y * h - .5).astype(np.int32)
+        if settings.mode == "guided":
+            center, confident = _bridge_gaps(camera, settings, x, base)
+        else:
+            center, confident = base, np.ones(len(x), dtype=bool)
         mid = center[:, None] + np.arange(-settings.half_height, settings.half_height + 1)
         offset = settings.half_height + settings.side_spacing
         near = np.arange(offset, offset + settings.side_height)
         sides = center[:, None] + np.concatenate((-near[::-1], near))
-        return cls(x, center, mid, sides, w, h)
+        return cls(x, center, mid, sides, w, h, base, confident, settings.mode, controls)
 
     @property
     def uv(self) -> np.ndarray:
@@ -133,6 +262,8 @@ class Trace:
         primary = SampleBlock.read(camera, plan.x, plan.middle, settings)
         sides = SampleBlock.read(camera, plan.x, plan.adjacent, settings)
         signal, status, raw, background = _separate(settings, primary, sides)
+        if settings.mode == "guided":
+            status[(status == OK) & ~plan.confident] = AMBIGUOUS
         if fit:
             axis, in_axis = fit.mapped(plan.uv[:, 0])
             status = np.where((status == OK) & ~in_axis, NO_AXIS, status)
@@ -169,18 +300,27 @@ class Trace:
     def row(self, i: int, exact: bool = False) -> dict:
         plan = self.plan
         result = {"column_px": int(plan.x[i]), "center_row_px": int(plan.centers[i]),
+                  "straight_row_px": int(plan.base[i]) if plan.mode == "guided" else None,
+                  "row_offset_px": int(plan.centers[i] - plan.base[i]) if plan.mode == "guided" else 0,
                   "source_uv": [rounded(q, 8) for q in plan.uv[i]], "x_axis": rounded(self.axis[i]),
                   "axis_units": self.units, "native_signal": rounded(self.native[i]),
                   "sideband_signal": rounded(self.background[i]), "linear_signal": rounded(self.signal[i]),
                   "within_strip_mad": rounded(self.deviation[i]), "state": STATUSES[self.statuses[i]],
                   "support_pixels": int(self.middle_count[i]), "sideband_pixels": int(self.side_count[i]),
                   "clip_pixels": int(self.clipped_count[i]), "dark_pixels": int(self.dark_count[i])}
+        if plan.mode == "guided":
+            result["trace_confident"] = bool(plan.confident[i])
         if exact:
             result["used_strip_rows"] = plan.middle[i][self.middle_support[i]].astype(int).tolist()
             result["used_sideband_rows"] = (
                 plan.adjacent[i][self.side_support[i]].astype(int).tolist() if self.config.subtract_sides else []
             )
             result["requested_strip_rows"] = plan.middle[i].astype(int).tolist()
+            result["straight_strip_rows"] = (
+                (plan.base[i] + np.arange(-self.config.half_height, self.config.half_height + 1)).astype(int).tolist()
+                if plan.mode == "guided" else result["requested_strip_rows"])
+            if not self.known[i]:
+                result["used_strip_rows"] = []
         return result
 
     def rows(self):
@@ -189,14 +329,22 @@ class Trace:
     def summary(self) -> dict:
         finite = self.known & np.isfinite(self.signal)
         stats = np.bincount(self.statuses, minlength=len(STATUSES))
-        return {"axis": self.units, "columns": len(self.axis),
-                "states": {name: int(n) for name, n in zip(STATUSES, stats, strict=True)},
-                "measured_fraction": rounded(stats[OK] / len(self.axis)),
-                "minimum_signal": rounded(np.min(self.signal[finite])) if np.any(finite) else None,
-                "maximum_signal": rounded(np.max(self.signal[finite])) if np.any(finite) else None,
-                "median_signal": rounded(np.median(self.signal[finite])) if np.any(finite) else None,
-                "sideband_subtraction": self.config.subtract_sides,
-                "strip_height": 2 * self.config.half_height + 1}
+        measured = stats[OK]
+        result = {"axis": self.units, "columns": len(self.axis),
+                  "states": {name: int(n) for name, n in zip(STATUSES, stats, strict=True)},
+                  "measured_fraction": rounded(measured / len(self.axis)),
+                  "minimum_signal": rounded(np.min(self.signal[finite])) if np.any(finite) else None,
+                  "maximum_signal": rounded(np.max(self.signal[finite])) if np.any(finite) else None,
+                  "median_signal": rounded(np.median(self.signal[finite])) if np.any(finite) else None,
+                  "sideband_subtraction": self.config.subtract_sides,
+                  "strip_height": 2 * self.config.half_height + 1,
+                  "trace_mode": self.plan.mode}
+        if self.plan.mode == "guided":
+            shifts = self.plan.centers.astype(int) - self.plan.base
+            result.update({"trace_guide_points": len(self.config.controls) - 2,
+                           "trace_uncertain_columns": int(stats[AMBIGUOUS]),
+                           "trace_shift_min_px": int(np.min(shifts)), "trace_shift_max_px": int(np.max(shifts))})
+        return result
 
 
 def _separate(settings: Strip, block: SampleBlock, side: SampleBlock):

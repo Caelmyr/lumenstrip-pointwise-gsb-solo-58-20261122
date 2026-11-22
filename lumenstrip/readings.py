@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from .camera import input_histogram, rgb_stats, saturation, signal_overlay, channel_values, native_grid
 from .contracts import ImageCrop, Problem, allowed, choice, flag, real, rounded, whole
 from .result import Result
-from .strip import SampleBlock, contiguous
-from .view import (AMBER, BLUE, CYAN, GREEN, PINK, Series, cropped_camera, palette, plot,
-                   plot_anchor_view, strip_heat, strip_overlay, tile_view)
+from .strip import AMBIGUOUS, STATUSES, SampleBlock, contiguous, Trace
+from .view import (AMBER, BLUE, CYAN, GREEN, PINK, QUIET, Region, Series, cropped_camera, palette, plot,
+                   plot_anchor_view, strip_heat, strip_overlay, tile_view, trace_overlay)
 
 SOURCE_PROBE = {"kind": "source", "source_index": 0}
 
@@ -123,11 +125,47 @@ def spectrum(bench):
     report.metrics = {**t.summary(), "source": s.title, "channel": t.config.channel,
                       "wavelength_calibration": s.fit.title if s.fit else None}
     report.rows = t.rows()
+    uncertain = [Region(rounded(float(np.min(t.axis[run]))), rounded(float(np.max(t.axis[run]))),
+                        "unread: two lines not separable", PINK)
+                 for run in contiguous(t.statuses == AMBIGUOUS) if np.any(np.isfinite(t.axis[run]))]
     report.chart("camera-spectrum", "Linear light along the strip",
-                 plot("Camera spectrum", t.units, "Linear signal", lines))
+                 plot("Camera spectrum", t.units, "Linear signal", lines, regions=uncertain))
     report.image("strip-origin", "Native strip and sideband positions", strip_overlay(s.camera, t), SOURCE_PROBE)
     report.image("source-rows", "Expanded camera rows", strip_heat(s.camera, t))
     report.csv("spectrum-reading", "Camera strip readings and source coordinates", report.rows)
+    return report
+
+
+def trace_path(bench):
+    """Show, on the untouched original, which native rows this reading actually used."""
+    s = bench.one()
+    cfg = bench.order.settings
+    allowed(cfg, {"columns"}, "trace path")
+    columns = whole(cfg.get("columns", 65), "Native columns to list", 8, 160)
+    t = s.trace
+    rows = t.rows()
+    stepped = [rows[i] for i in np.unique(np.rint(np.linspace(0, len(rows) - 1, min(columns, len(rows)))).astype(int))]
+    straight_trace = Trace.read(s.camera, replace(t.config, mode="linear"), s.fit) if t.plan.mode == "guided" else None
+    stats = np.bincount(t.statuses, minlength=len(STATUSES))
+    report = Result("trace-path", "Rows taken on the original capture",
+                    "The original image is marked with the native rows used per column, the reading path "
+                    "next to the old straight-line path, and every span left unread.")
+    report.metrics = {"trace_mode": t.plan.mode, "source": s.title, "columns": len(rows),
+                      "guide_points": len(t.config.controls) - 2,
+                      "measured_columns": int(stats[0]),
+                      "trace_uncertain_columns": int(stats[6]),
+                      "unread_columns": int(len(rows) - stats[0]),
+                      "shift_pixels": [int(t.plan.centers.min() - t.plan.base.min()),
+                                       int(t.plan.centers.max() - t.plan.base.max())]}
+    if straight_trace is not None:
+        report.metrics["straight_path_measured_columns"] = int(np.count_nonzero(straight_trace.known))
+    report.rows = stepped
+    report.image("trace-on-original", "Reading path and taken rows on the original",
+                 trace_overlay(s.camera, t, straight_trace), SOURCE_PROBE)
+    if straight_trace is not None:
+        report.image("straight-on-original", "Old straight-line path on the same original",
+                     strip_overlay(s.camera, straight_trace), SOURCE_PROBE)
+    report.csv("trace-row-evidence", "Native rows requested and used for each listed column", stepped)
     return report
 
 

@@ -174,8 +174,15 @@ def captures(app, lab, capacity):
                 raise Problem("Reload the camera record before changing its strip.", 409)
             trace = Trace.read(source.camera, settings, source.fit)
             image = strip_overlay(source.camera, trace)
+            straight = None
+            if settings.mode == "guided":
+                from dataclasses import replace
+                linear_trace = Trace.read(source.camera, replace(settings, mode="linear"), source.fit)
+                straight = {"summary": linear_trace.summary(),
+                            "overlay": base_image(encode_png(strip_overlay(source.camera, linear_trace)))}
             saved = lab.set_strip(key, rev, settings) if persist else None
             return {"source": saved, "configuration": settings.public(), "summary": trace.summary(),
+                    "rows": trace.rows(), "straight_comparison": straight,
                     "overlay": base_image(encode_png(image))}
 
     @app.post("/api/sources/<key>/calibration")

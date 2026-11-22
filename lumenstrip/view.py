@@ -8,9 +8,9 @@ from functools import lru_cache
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from .camera import Camera
+from .camera import Camera, _preview_rgba
 from .contracts import rounded
-from .strip import CLIPPED, NO_PIXELS, OK, Trace, contiguous
+from .strip import AMBIGUOUS, CLIPPED, NO_PIXELS, OK, Trace, contiguous
 
 CANVAS = (22, 32, 43)
 PANEL = (33, 47, 61)
@@ -181,23 +181,89 @@ def _point_geom(camera: Camera, image: Image.Image, region, y):
 def strip_overlay(camera: Camera, trace: Trace, native_ix: int | None = None) -> Image.Image:
     image = _backdrop(camera)
     draw = ImageDraw.Draw(image)
+    guided = trace.plan.mode == "guided"
+    if guided:
+        straight = trace.plan.base
+        for key, y in trace.plan.traces().items():
+            if key.startswith("side"):
+                continue
+            offset = y - trace.plan.centers
+            draw.line(_point_geom(camera, image, trace.plan.x, straight + offset), fill=QUIET, width=1)
+        for u, v in trace.config.controls:
+            px, py = u * image.width, np.clip(v, 0, 1) * image.height
+            draw.ellipse((px - 3, py - 3, px + 3, py + 3), outline=AMBER, width=1)
     for key, y in trace.plan.traces().items():
         color = AMBER if key.startswith("side") else CYAN
         draw.line(_point_geom(camera, image, trace.plan.x, y), fill=color,
                   width=1 if key == "central" or key.startswith("side") else 2)
-    for status, color in ((CLIPPED, RED), (NO_PIXELS, BLUE)):
-        for run in contiguous(trace.statuses == status):
-            positions = _point_geom(camera, image, trace.plan.x[run], trace.plan.centers[run])
-            if len(positions) > 1:
-                draw.line(positions, fill=color, width=6)
-            elif positions:
-                x, y = positions[0]
-                draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+    if guided:
+        for status, color, thickness in ((AMBIGUOUS, PINK, 3), (CLIPPED, RED, 6), (NO_PIXELS, BLUE, 6)):
+            for run in contiguous(trace.statuses == status):
+                positions = _point_geom(camera, image, trace.plan.x[run], trace.plan.centers[run])
+                if len(positions) > 1:
+                    draw.line(positions, fill=color, width=thickness)
+                elif positions:
+                    x, y = positions[0]
+                    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+    else:
+        for status, color in ((CLIPPED, RED), (NO_PIXELS, BLUE)):
+            for run in contiguous(trace.statuses == status):
+                positions = _point_geom(camera, image, trace.plan.x[run], trace.plan.centers[run])
+                if len(positions) > 1:
+                    draw.line(positions, fill=color, width=6)
+                elif positions:
+                    x, y = positions[0]
+                    draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
     if native_ix is not None:
         u, v = trace.plan.uv[native_ix]
         x, y = u * image.width, v * image.height
         draw.line((x - 9, y, x + 9, y), fill=TEXT, width=2)
         draw.line((x, y - 9, x, y + 9), fill=TEXT, width=2)
+    return image
+
+
+def trace_overlay(camera: Camera, trace: Trace, straight: Trace | None = None) -> Image.Image:
+    """Mark the native rows actually used at sampled columns on the untouched original."""
+    plan = trace.plan
+    w, h = camera.size
+    lo_row = int(min(plan.adjacent.min(), plan.middle.min(), plan.base.min()))
+    hi_row = int(max(plan.adjacent.max(), plan.middle.max(), plan.base.max())) + 1
+    margin = max(6, (hi_row - lo_row) // 3)
+    top = max(0, lo_row - margin)
+    bottom = min(h, hi_row + margin)
+    rgb, alpha, (left, _) = camera.crop((plan.x[0], top, plan.x[-1] + 1, bottom))
+    image = Image.fromarray(_preview_rgba(rgb, alpha))
+    draw = ImageDraw.Draw(image)
+    factor = max(1, min(5, 1180 // max(1, image.width)))
+    if factor > 1:
+        image = image.resize((image.width * factor, image.height * factor), Image.Resampling.NEAREST)
+        draw = ImageDraw.Draw(image)
+
+    def place(columns, rows):
+        return ((columns - left + .5) * factor, (rows - top + .5) * factor)
+
+    step = max(1, (plan.x[-1] - plan.x[0] + 1) // 160)
+    picked = np.arange(0, len(plan.x), step)
+    for i in picked:
+        x = (plan.x[i] - left + .5) * factor
+        y0 = (plan.middle[i, 0] - top + .5) * factor
+        y1 = (plan.middle[i, -1] - top + .5) * factor
+        draw.line((x, y0, x, y1), fill=CYAN, width=factor)
+    if straight is not None:
+        s = straight.plan
+        sp = np.arange(0, len(s.x), max(1, (s.x[-1] - s.x[0] + 1) // 160))
+        position = place(s.x[sp], s.centers[sp])
+        draw.line(list(zip(position[0].tolist(), position[1].tolist(), strict=True)), fill=QUIET, width=1)
+    for status, color in ((AMBIGUOUS, PINK), (CLIPPED, RED), (NO_PIXELS, BLUE)):
+        for run in contiguous(trace.statuses == status):
+            if run.stop - run.start < 1:
+                continue
+            position = place(plan.x[run], plan.centers[run])
+            if len(position[0]) > 1:
+                draw.line(list(zip(position[0].tolist(), position[1].tolist(), strict=True)),
+                          fill=color, width=max(2, factor))
+    path = place(plan.x, plan.centers)
+    draw.line(list(zip(path[0].tolist(), path[1].tolist(), strict=True)), fill=AMBER, width=1)
     return image
 
 
@@ -226,7 +292,14 @@ def strip_heat(camera: Camera, trace: Trace) -> Image.Image:
     image = Image.fromarray(camera.rgba()[min_row:max_row, start:stop]).convert("RGB")
     draw = ImageDraw.Draw(image)
     a, b = plan.traces()["upper"] - min_row, plan.traces()["lower"] - min_row
+    straight_a = plan.base + (plan.middle[:, 0] - plan.centers) - min_row
+    straight_b = plan.base + (plan.middle[:, -1] - plan.centers) - min_row
     x = plan.x - start
+    if plan.mode == "guided":
+        draw.line(list(zip(x.tolist(), straight_a.tolist(), strict=True)), fill=QUIET, width=1)
+        draw.line(list(zip(x.tolist(), straight_b.tolist(), strict=True)), fill=QUIET, width=1)
+        for run in contiguous(trace.statuses == AMBIGUOUS):
+            draw.rectangle((x[run.start], 0, x[run.stop - 1], image.height), outline=PINK, width=1)
     draw.line(list(zip(x.tolist(), a.tolist(), strict=True)), fill=CYAN, width=1)
     draw.line(list(zip(x.tolist(), b.tolist(), strict=True)), fill=CYAN, width=1)
     factor = min(4, max(1, 1120 // image.width))
@@ -247,6 +320,12 @@ def annotate_loupe(camera: Camera, trace: Trace, i: int, radius: int):
             if 0 <= y < image.height:
                 d = max(2, scale // 4)
                 draw.rectangle((x - d, y - d, x + d, y + d), outline=color, width=2)
+    if trace.plan.mode == "guided":
+        for row in p["straight_strip_rows"]:
+            y = (row - oy) * scale + scale // 2
+            if 0 <= y < image.height:
+                d = max(2, scale // 4)
+                draw.rectangle((x - d, y - d, x + d, y + d), outline=QUIET, width=1)
     return image, {**point, "column_result": p}
 
 

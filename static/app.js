@@ -10,6 +10,7 @@ const models = {
   tab: "inspect", tool: "spectrum", fields: {}, report: null, asset: "", witness: null,
   reportSource: 0, strip: null, calibration: null, savedFits: [], bookmarks: [],
   prepOverlay: "", draft: null, expected: "", pick: null, lastPoint: null, activity: [], folio: [],
+  stripPreview: null,
 };
 let timeout;
 
@@ -131,6 +132,8 @@ async function loadSource() {
   models.savedFits = output.calibrations;
   models.bookmarks = output.bookmarks;
   models.strip = structuredClone(output.source.strip);
+  if (!Array.isArray(models.strip.guides)) models.strip.guides = [];
+  models.stripPreview = null;
   const currentFit = output.calibrations.find((x) => x.id === output.source.active_fit);
   models.calibration = currentFit ? structuredClone(currentFit.calibration) : {title:"Wavelength ruler", method:"linear", limit:"anchors",
     anchors:[{name:"First line", column:.2, nm:450, weight:1},{name:"Second line", column:.8, nm:650, weight:1}]};
@@ -170,10 +173,16 @@ function witnessView() {
   const w = models.witness;
   if (!w) return "";
   const result = w.reading;
+  const column = result.column_result;
+  const rows = column ? `<div class="metrics">
+    <div class="metric"><small>Rows used this reading</small><strong>${esc(column.used_strip_rows?.length ? column.used_strip_rows.join(", ") : "none (left unread)")}</strong></div>
+    ${column.straight_strip_rows ? `<div class="metric"><small>Rows the straight line would use</small><strong>${esc(column.straight_strip_rows.join(", "))}</strong></div>` : ""}
+    <div class="metric"><small>State</small><strong>${esc(column.state)}</strong></div></div>` : "";
   return `<section class="measure"><h3>Camera witness</h3>${metrics({state:result.state, requested_axis:result.requested_axis,
     sampled_axis:result.sampled_axis, source:result.source?.meta.title, column:result.pixel?.[0], row:result.pixel?.[1]})}
     ${w.witness ? `<img class="inline-witness" alt="Magnified actual source pixels" src="${esc(w.witness)}">` : ""}
         ${result.bookmark ? `<p class="tiny">${esc(result.bookmark.name)} · ${esc(result.bookmark.message)}</p>` : ""}
+    ${rows}
     ${result.uv && models.tab === "strip" ? button("Bookmark this source point","bookmark") : ""}
     ${folds("Exact native evidence", result.column_result || result)}</section>`;
 }
@@ -210,19 +219,49 @@ function resultView() {
   ${(r.warnings||[]).map((w) => `<p class="warning">${esc(w)}</p>`).join("")}
   ${(r.review_notes||[]).map((w) => `<p class="notes-entry">${esc(w.message)}</p>`).join("")}</section>`;
 }
+function stripSummary(summary) {
+  if (!summary) return "";
+  const states = summary.states || {};
+  const bits = Object.entries(states).filter(([,n]) => n > 0).map(([k,n]) => `<div class="metric"><small>${esc(k)}</small><strong>${esc(n)}</strong></div>`).join("");
+  return `<div class="metrics">${bits}<div class="metric"><small>Trace path</small><strong>${esc(summary.trace_mode === "guided" ? "guiding" : "straight")}</strong></div>
+    <div class="metric"><small>Unread columns</small><strong>${esc((summary.columns || 0) - (states["measured"] || 0))}</strong></div>
+    ${summary.trace_shift_min_px != null ? `<div class="metric"><small>Row shift vs straight</small><strong>${esc(summary.trace_shift_min_px)} to ${esc(summary.trace_shift_max_px)} px</strong></div>` : ""}</div>`;
+}
+function stripComparison(preview) {
+  const straight = preview?.straight_comparison;
+  if (!straight) return "";
+  const s = straight.summary;
+  return `<details><summary>Old straight-line reading on the same strip</summary>${stripSummary(s)}
+    <p class="tiny">This is the previous reading. It still crosses the whole frame; pick “Straight” below to keep it.</p>
+    ${straight.overlay ? `<img class="inline-witness" alt="Straight-line strip preview" src="${esc(straight.overlay)}">` : ""}</details>`;
+}
 function stripEditor() {
   if (!source()) return "";
   const a = models.strip;
+  const guided = a.mode !== "linear";
   const checks = checked("Subtract measured sidebands","subtract_sides",a.subtract_sides);
-  const editor = `<div class="fields">${area("Center anchors (relative x, y)","endpoints",pretty(a.endpoints),3)}
+  const editor = `<div class="fields">
+    ${dropdown("Reading path","mode",[["guided","Follow my marks (curved)"],["linear","Straight two-point line"]],a.mode || "linear")}
+    ${area("Centre line points (x, y, relative)","endpoints",pretty([a.endpoints[0], ...(a.guides||[]), a.endpoints[1]]),5)}
     ${nfield("Half-height (px)","half_height",a.half_height,1)}${nfield("Column step (px)","step",a.step,1)}
     ${nfield("Sideband gap (px)","side_spacing",a.side_spacing,1)}${nfield("Sideband height (px)","side_height",a.side_height,1)}
     ${nfield("Shadow guard","low_guard",a.low_guard,.0001)}${nfield("Clip guard","high_guard",a.high_guard,.001)}
+    ${nfield("Search either side (px)","search",a.search ?? 6,1)}
+    ${nfield("Ambiguity ratio","margin",a.margin ?? .82,.01)}
     ${dropdown("Signal channel","channel",["linear-luma","red","green","blue","mean"].map((x)=>[x,title(x)]),a.channel)}
     ${dropdown("Estimator","level",[["mean","Mean"],["median","Median"]],a.level)}${checks}</div>`;
   const notes = models.bookmarks.map((m) => button(m.title,"bookmark-open",m.id,"record-select")).join("");
-  return `<aside class="panel right"><h2>Strip geometry</h2><p class="help">Set two points in the middle of the spectrum, then inspect the sideband rows.</p>
-    ${button("Click two center anchors","strip-draw")}${form("strip",editor,"Preview strip")}${button("Save strip","strip-retain")}
+  const pickHelp = models.pick?.kind === "strip"
+    ? (models.pick.points.length ? "Click the next point on the same spectral band, or press Done." : "Click the left end, then more points along the same band, then the right end.")
+    : "Mark several points on the same band so the reading can follow it where the plate bends.";
+  return `<aside class="panel right"><h2>Strip geometry</h2>${button("Mark points on the band","strip-draw","","primary")}
+    ${models.pick?.kind === "strip" ? button("Done marking","strip-done") + button("Clear points","strip-clear") : ""}
+    <p class="help">${pickHelp}</p>
+    <p class="tiny">${guided ? "Only pixels inside the search band around your marks are read. Where two bright lines are too close to tell apart, that span is left unread." : "A single straight line between the two ends, read the old way."}</p>
+    ${form("strip",editor,"Preview strip")}
+    ${models.stripPreview ? stripSummary(models.stripPreview.summary) + stripComparison(models.stripPreview) : ""}
+    ${models.stripPreview?.rows?.length ? `<details><summary>Exact rows taken · ${models.stripPreview.rows.length}</summary>${table(models.stripPreview.rows)}</details>` : ""}
+    ${button("Save strip","strip-retain")}
     ${button("Edit capture","edit-capture")} ${button("Check camera original","check-camera")}${notes ? `<h3>Source bookmarks</h3>${notes}` : ""}</aside>`;
 }
 function calibrationEditor() {
@@ -297,9 +336,11 @@ function rememberSettings() {
 }
 function readStrip() {
   const fd = new FormData(q('form[data-form="strip"]'));
-  const data = {endpoints:JSON.parse(fd.get("endpoints")), channel:fd.get("channel"), level:fd.get("level"),
+  const line = JSON.parse(fd.get("endpoints"));
+  const data = {endpoints:[line[0], line[line.length-1]], guides:line.slice(1,-1),
+    mode:fd.get("mode"), channel:fd.get("channel"), level:fd.get("level"),
     subtract_sides:fd.has("subtract_sides")};
-  for (const k of ["half_height","step","side_spacing","side_height","low_guard","high_guard"]) data[k]=Number(fd.get(k));
+  for (const k of ["half_height","step","side_spacing","side_height","low_guard","high_guard","search","margin"]) data[k]=Number(fd.get(k));
   models.strip = data;
   return data;
 }
@@ -318,6 +359,7 @@ async function stripPreview(retain) {
     await loadSource();
     announce("Strip saved.");
   }
+  models.stripPreview = preview;
   models.prepOverlay = preview.overlay;
   models.pick = null; models.witness = null;
   render();
@@ -392,7 +434,8 @@ function svgPoints() {
   svg.setAttribute("height",box.height);
   svg.setAttribute("viewBox",`0 0 ${box.width} ${box.height}`);
   const points = models.pick?.points ?? [];
-  svg.innerHTML = points.map(([x,y])=>`<circle cx="${x*box.width}" cy="${y*box.height}" r="5" fill="#8fe3cf" stroke="#14252b" stroke-width="2"/>`).join("");
+  const path = points.length > 1 ? `<polyline points="${points.map(([x,y])=>`${x*box.width},${y*box.height}`).join(" ")}" fill="none" stroke="#8fe3cf" stroke-width="2" stroke-dasharray="5 4"/>` : "";
+  svg.innerHTML = path + points.map(([x,y])=>`<circle cx="${x*box.width}" cy="${y*box.height}" r="5" fill="#8fe3cf" stroke="#14252b" stroke-width="2"/>`).join("");
 }
 async function stagePoint(event) {
   const img = q("#stage-image");
@@ -405,10 +448,17 @@ async function stagePoint(event) {
     if (current.kind === "anchor") {
       models.calibration.anchors[current.index].column=current.points[0][0];
       models.expected="";
-    } else if (current.points.length < 2) {
-      svgPoints();return;
-    } else if (current.kind === "strip") models.strip.endpoints=current.points;
-    else models.fields[current.key]=current.points;
+      models.pick=null; render(); return;
+    }
+    if (current.kind === "strip") {
+      // Strip marking stays open so the user can add as many points as needed.
+      models.strip.endpoints=[current.points[0], current.points[current.points.length-1]];
+      models.strip.guides=current.points.slice(1,-1);
+      if (!models.strip.mode || models.strip.mode === "linear") models.strip.mode="guided";
+      render(); return;
+    }
+    if (current.points.length < 2) { svgPoints(); return; }
+    models.fields[current.key]=current.points;
     models.pick=null;
     render();
     return;
@@ -437,6 +487,7 @@ function markDraw(kind,key="") {
   }
   models.prepOverlay="";
   models.pick={kind,key,index:Number(key),points:[]};
+  if (kind === "strip") models.stripPreview = null;
   render();
 }
 
@@ -489,6 +540,8 @@ const actions = {
   "row-point":(key)=>pointWitness("camera",JSON.parse(key)),
   "row-axis":(key)=>pointWitness("axis",Number(key)),
   "strip-draw":()=>markDraw("strip"),
+  "strip-done":()=>{models.pick=null;render();},
+  "strip-clear":()=>{models.pick=null;models.strip.guides=[];models.stripPreview=null;models.prepOverlay="";render();},
   "tool-draw":(key)=>markDraw("tool",key),
   "anchor-pick":(key)=>markDraw("anchor",key),
   "strip-retain":()=>stripPreview(true),

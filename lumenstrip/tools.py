@@ -13,7 +13,8 @@ from .noise import noise_windows, sidebands
 from .continuum import envelopes, flatness, slope_edges
 from .instrument import dark_field, exposure_response, trace_placement
 from .comparison import band_comparison, drift, overlay, repeatability, transmission
-from .readings import aperture, calibration_check, diagnostics, height_scan, spectrum, support_audit, tiles
+from .readings import (aperture, calibration_check, diagnostics, height_scan, spectrum, support_audit,
+                       tiles, trace_path)
 from .spectral import bands, crest_report, visible_balance
 
 
@@ -72,6 +73,9 @@ TOOLS = {tool.name: tool for tool in (
          "Read native camera samples along the retained strip geometry.",
          (boolean("show_native", "Show original strip level", True),
           boolean("show_background", "Show observed sidebands", False)), spectrum),
+    Tool("trace-path", "Rows taken on original", "Strip", 1, 1,
+         "Mark the original capture with the exact native rows each column used and the spans left unread.",
+         (number("columns", "Columns to list", 65),), trace_path),
     Tool("strip-height", "Cross-strip response", "Strip", 1, 1,
          "Measure signal and native support above and below the chosen center.",
          (number("radius", "Vertical radius", 13, 1, "px"),
