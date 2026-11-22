@@ -150,21 +150,57 @@ class Trace:
         return self.statuses == OK
 
     def axis_array(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Supported samples sorted by wavelength, with a NaN break at every real gap.
+
+        A disabled or unsupported stretch is kept as an actual NaN separator. Without it the
+        two sides would look adjacent, and tools that pair neighbouring samples would quietly
+        draw a straight line across light nobody measured.
+        """
         mask = np.isfinite(self.axis)
         x = self.axis[mask]
+        values = self.signal[mask]
+        good = self.known[mask]
         order = np.argsort(x)
-        absolute_indexes = np.flatnonzero(mask)[order]
-        return x[order], self.signal[absolute_indexes], self.known[absolute_indexes]
+        x, values, good = x[order], values[order], good[order]
+        if len(x) < 2:
+            return x, values, good
+        breaks = np.flatnonzero(np.diff(x) > np.maximum(1e-9, np.median(np.diff(x)) * 4))
+        if not len(breaks):
+            return x, values, good
+        pieces_x, pieces_v, pieces_k = [], [], []
+        start = 0
+        for edge in (*breaks, len(x) - 1):
+            pieces_x.append(x[start:edge + 1]); pieces_v.append(values[start:edge + 1])
+            pieces_k.append(good[start:edge + 1])
+            start = edge + 1
+            if edge != len(x) - 1:
+                pieces_x.append(np.asarray([np.nan])); pieces_v.append(np.asarray([np.nan]))
+                pieces_k.append(np.asarray([False]))
+        return np.concatenate(pieces_x), np.concatenate(pieces_v), np.concatenate(pieces_k)
 
     def interval(self, target: float) -> int | None:
+        """Nearest sampled column to an axis value, or None when that value is not measured.
+
+        The scan follows the real NaN breaks in the axis, so a wavelength that falls between two
+        measured runs is reported as unmeasured rather than snapped onto one side.
+        """
         points = np.flatnonzero(np.isfinite(self.axis))
         if not len(points):
             return None
-        axis = self.axis[points]
-        edge = abs(axis[-1] - axis[0]) / max(1, len(axis) - 1) / 2
-        if target < np.min(axis) - edge or target > np.max(axis) + edge:
-            return None
-        return int(points[np.argmin(np.abs(axis - target))])
+        runs = [[int(points[0])]]
+        for previous, current in zip(points[:-1], points[1:], strict=True):
+            if current != previous + 1:
+                runs.append([])
+            runs[-1].append(int(current))
+        for run in runs:
+            axis = self.axis[run]
+            if len(axis) > 1 and axis[0] > axis[-1]:
+                run, axis = run[::-1], axis[::-1]
+            step = float(np.median(np.diff(axis))) if len(axis) > 1 else 0.
+            edge = (axis[-1] - axis[0]) / max(1, len(axis) - 1) / 2 if len(axis) > 1 else 0.
+            if axis[0] - edge <= target <= axis[-1] + edge:
+                return run[int(np.argmin(np.abs(axis - target)))]
+        return None
 
     def row(self, i: int, exact: bool = False) -> dict:
         plan = self.plan

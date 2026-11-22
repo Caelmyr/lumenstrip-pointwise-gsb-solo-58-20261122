@@ -8,6 +8,7 @@ from .camera import input_histogram, rgb_stats, saturation, signal_overlay, chan
 from .contracts import ImageCrop, Problem, allowed, choice, flag, real, rounded, whole
 from .result import Result
 from .strip import SampleBlock, contiguous
+from .suggest import influence as anchor_influence
 from .view import (AMBER, BLUE, CYAN, GREEN, PINK, Series, cropped_camera, palette, plot,
                    plot_anchor_view, strip_heat, strip_overlay, tile_view)
 
@@ -140,11 +141,15 @@ def calibration_check(bench):
     columns = whole(bench.order.settings.get("columns", 65), "Axis inspection samples", 16, 160)
     rows = s.fit.coordinates_rows(s.camera.size[0], columns)
     residual = s.fit.description(s.camera.size[0])
+    influence = anchor_influence(s.fit, s.camera.size[0])
     xs = np.asarray([r["relative_column"] for r in rows])
     ys = np.asarray([r["wavelength_nm"] if r["wavelength_nm"] is not None else np.nan for r in rows])
     stat = Result("calibration-check", "Wavelength ruler",
                   "The known anchors, mapped detector columns and excluded outer columns are shown together.")
-    stat.metrics = residual
+    stat.metrics = {**residual, "unmeasured_intervals": len(s.fit.excluded),
+                    "most_influential_anchor": (influence[0]["name"] if influence else None),
+                    "most_influential_change_nm": (influence[0]["largest_reading_change_nm"]
+                                                   if influence else None)}
     stat.rows = rows
     chart = plot("Wavelength by camera column", "Relative camera column", "Wavelength (nm)",
                  [Series("Included wavelength support", xs, ys)], x_bounds=(0, 1),
@@ -154,6 +159,16 @@ def calibration_check(bench):
                SOURCE_PROBE)
     stat.csv("wavelength-columns", "Columns inside and outside wavelength support", rows)
     stat.csv("calibration-residuals", "Anchor fit residuals", residual["anchors"])
+    if influence:
+        stat.csv("anchor-influence", "Reading change if each anchor is dropped", influence)
+    if s.fit.excluded:
+        stat.csv("unmeasured-intervals", "Intervals the ruler will not measure",
+                 [{"first_relative_column": rounded(low), "last_relative_column": rounded(high),
+                   "first_native_px": rounded(low * s.camera.size[0] - .5, 3),
+                   "last_native_px": rounded(high * s.camera.size[0] - .5, 3),
+                   "first_nm": rounded(float(s.fit._raw(np.asarray([low]))[0])),
+                   "last_nm": rounded(float(s.fit._raw(np.asarray([high]))[0]))}
+                  for low, high in s.fit.excluded])
     return stat
 
 

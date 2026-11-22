@@ -10,6 +10,7 @@ const models = {
   tab: "inspect", tool: "spectrum", fields: {}, report: null, asset: "", witness: null,
   reportSource: 0, strip: null, calibration: null, savedFits: [], bookmarks: [],
   prepOverlay: "", draft: null, expected: "", pick: null, lastPoint: null, activity: [], folio: [],
+  suggest: null, suggestion: null, suggestionChart: "", held: null,
 };
 let timeout;
 
@@ -135,6 +136,19 @@ async function loadSource() {
   models.calibration = currentFit ? structuredClone(currentFit.calibration) : {title:"Wavelength ruler", method:"linear", limit:"anchors",
     anchors:[{name:"First line", column:.2, nm:450, weight:1},{name:"Second line", column:.8, nm:650, weight:1}]};
   models.expected = ""; models.pick = null; models.prepOverlay = ""; models.lastPoint = null;
+  models.suggest = suggestionFromRuler(models.calibration);
+  models.suggestion = null; models.suggestionChart = ""; models.held = null;
+}
+function suggestionFromRuler(ruler) {
+  const anchors = ruler.anchors.slice(0, 27).filter((a) => a.nm != null);
+  const lines = anchors.length >= 3
+    ? anchors.map((a) => ({name: a.name, nm: a.nm, reads: [], role: "fit"}))
+    : [{name:"Line 1", nm:450, reads:[], role:"fit"}, {name:"Line 2", nm:550, reads:[], role:"fit"},
+       {name:"Check line", nm:650, reads:[], role:"check"}];
+  if (lines.length < 3) lines.push({name:"Check line", nm:650, reads:[], role:"check"});
+  if (!lines.some((l) => l.role === "check")) lines[lines.length - 1].role = "check";
+  return {title: "Suggested ruler", methods: ["linear", "interpolate"], limit: "anchors",
+    max_gap: .16, tolerance: .75, repeat_limit_px: 3, lines};
 }
 function sourceList() {
   const list = models.sources.map((s) => `<div class="source-card ${s.id === models.active ? "current" : ""}">
@@ -156,7 +170,8 @@ function frame() {
   const figureTitle = viewing && chosen ? chosen.title : source()?.meta.title || "Camera stage";
   const showSource = viewing && models.report?.sources?.length > 1;
   const images = assetList().filter((a) => a.mime.startsWith("image/"));
-  const label = models.pick ? "Click the requested position on the camera image." : "";
+  const label = models.pick ? (models.pick.kind === "note"
+    ? "Click each known line twice; the second click joins the first." : "Click the requested position on the camera image.") : "";
   return `<section class="stage"><h2>${esc(figureTitle)}</h2>${showSource ? dropdown("Point evidence source","report-source",
     models.report.sources.map((s,i) => [String(i),s.meta.title]),String(models.reportSource)) : ""}
     ${img ? `<div class="scene ${models.pick ? "is-picking" : ""}"><div class="target">
@@ -232,12 +247,96 @@ function calibrationEditor() {
     ${dropdown("Wavelength support","limit",[["anchors","Within anchor span"],["frame","Entire image width"]],p.limit)}</div>`;
   const anchors = p.anchors.map((a,i) => `<div class="anchor-item">${field("Name","anchor-name-"+i,a.name)}${nfield("Wavelength (nm)","anchor-nm-"+i,a.nm)}
     ${nfield("Relative column","anchor-column-"+i,a.column,.000001)}${button("Pick","anchor-pick",i)}</div>`).join("");
-  const choices = models.savedFits.map((x) => `<div class="fit-entry">${button(x.calibration.title,"fit-use",x.id,source().active_fit === x.id ? "primary" : "")}</div>`).join("");
+  const choices = models.savedFits.map((x) => `<div class="fit-entry">${button(x.calibration.title + (x.calibration.excluded?.length ? " · " + x.calibration.excluded.length + " unmeasured" : ""),"fit-use",x.id,source().active_fit === x.id ? "primary" : "")}</div>`).join("");
+  const gaps = (p.excluded || []).map(([a,b]) => `<li>${(a*100).toFixed(2)}%–${(b*100).toFixed(2)}% of the width is not measured</li>`).join("");
   return `<aside class="panel right"><h2>Wavelength ruler</h2>
     ${form("calibration",f+anchors+button("Add anchor","anchor-add")+button("Remove last anchor","anchor-remove"),"Preview ruler")}
     ${button("Save ruler","calibration-retain")}${button("Import ruler CSV","fit-import")}${button("Use native columns","fit-use","")}
     ${source().active_fit ? `<a class="download" href="${sourcePath()}/calibration.csv">Download ruler CSV</a>` : ""}
-    ${choices ? `<h3>Saved rulers</h3>${choices}` : ""}${models.draft?.fit ? folds("Fit residuals",models.draft.fit) : ""}</aside>`;
+    ${gaps ? `<div class="warning"><strong>Unmeasured intervals in this ruler</strong><ul>${gaps}</ul>
+      Readings skip these columns instead of interpolating across them.</div>` : ""}
+    ${choices ? `<h3>Saved rulers</h3>${choices}` : ""}${models.draft?.fit ? folds("Fit residuals",models.draft.fit) : ""}
+    ${suggestionPanel()}</aside>`;
+}
+function suggestionPanel() {
+  const s = models.suggest;
+  if (!s) return "";
+  const lines = s.lines.map((line, i) => {
+    const reads = line.reads.map((v, k) =>
+      `<span class="read-slot">${nfield("Click " + (k + 1),"suggest-read-"+i+"-"+k,v,.000001)}
+        ${button("Re-click","suggest-click",i+":"+k,"mini")}</span>`).join(" ");
+    return `<div class="suggest-line"><div class="fields">
+      ${field("Line name","suggest-name-"+i,line.name)}${nfield("Wavelength (nm)","suggest-nm-"+i,line.nm)}
+      ${dropdown("Role","suggest-role-"+i,[["fit","Fit"],["check","Check only"]],line.role)}
+      <div class="wide">${button("Click this line","suggest-click",i+":"+line.reads.length)}${reads}</div>
+      </div></div>`;
+  }).join("");
+  const shown = models.suggestion;
+  const both = shown?.candidates?.length > 1 ? `<h4>Both fit methods, same lines</h4>${table(shown.candidates.map((c) => ({
+    method: c.method, recommended: c.method === shown.recommended,
+    checks_verified: c.checks_verified, checks_disagreeing: c.checks_disagreeing,
+    unmeasured_intervals: c.excluded.length,
+    worst_check_error_nm: c.worst_check_error_nm})))}` : "";
+  const report = shown ? `
+    <h3>Suggested ruler: ${esc(shown.method)}</h3>${both}
+    <img class="inline-witness" alt="Suggested ruler and disabled intervals" src="${esc(models.suggestionChart || "")}">
+    <details><summary>Clicked lines and their offsets</summary>${table(shown.lines)}</details>
+    ${metrics(shown.summary)}
+    ${(shown.warnings || []).map((w) => `<p class="warning">${esc(w)}</p>`).join("")}
+    ${shown.excluded.length ? `<h4>Not measured</h4>${table(shown.excluded.map((x) => ({relative_columns:x.relative_columns,
+      wavelength_nm:x.wavelength_nm, native_columns:x.native_columns, width_px:x.width_px, reasons:x.reasons.join("; ")})))}` : ""}
+    ${shown.check_lines.length ? `<h4>Check line</h4>${table(shown.check_lines)}` : ""}
+    ${shown.influence.length ? `<h4>Which point moves the reading most</h4>${table(shown.influence)}` : ""}
+    ${button("Use this ruler in the editor","suggest-use","","primary")}` : "";
+  return `<section class="measure"><h3>Suggest a ruler</h3>
+    <p class="help">Click each known line twice. Mark one line as the check: it is never fitted. A span is disabled rather than bent when the check line or a wide anchor gap cannot confirm it.</p>
+    ${form("suggest", lines +
+      `<div class="fields">${nfield("Largest trusted gap (fraction of width)","suggest-gap",s.max_gap,.01)}
+      ${nfield("Check tolerance (nm)","suggest-tolerance",s.tolerance,.05)}
+      ${nfield("Repeated-click allowance (px)","suggest-repeat",s.repeat_limit_px,.1)}</div>` +
+      button("Add line","suggest-add") + button("Remove last line","suggest-remove"), "Suggest ruler", s.lines.length < 3)}
+    ${source().active_fit ? (models.held ? `<details open><summary>Check the saved ruler</summary>${savedRulerReport()}</details>`
+      : button("Check the saved ruler's influence","suggest-held")) : ""}
+    ${report}</section>`;
+}
+function savedRulerReport() {
+  const h = models.held;
+  return `${metrics({title:h.fit.title, method:h.fit.method, anchors:h.fit.anchors?.length,
+    unmeasured_intervals:h.fit.unmeasured_intervals})}
+    ${h.influence.length ? `<h4>Which point moves the reading most</h4>${table(h.influence)}` : ""}
+    ${h.fit.unmeasured_intervals ? `<h4>Not measured</h4>${table(h.settings.excluded.map(([a,b]) => ({from:a,to:b})))}` : ""}`;
+}
+function rememberSuggestion() {
+  const editor = q('form[data-form="suggest"]');
+  if (!editor) return;
+  const fd = new FormData(editor);
+  const s = models.suggest;
+  s.max_gap = Number(fd.get("suggest-gap"));
+  s.tolerance = Number(fd.get("suggest-tolerance"));
+  s.repeat_limit_px = Number(fd.get("suggest-repeat"));
+  s.lines = s.lines.map((line, i) => ({
+    name: fd.get("suggest-name-" + i), nm: Number(fd.get("suggest-nm-" + i)),
+    role: fd.get("suggest-role-" + i),
+    reads: line.reads.map((_, k) => Number(fd.get("suggest-read-" + i + "-" + k)))
+      .filter((v) => !Number.isNaN(v) && v > 0)}));
+}
+function readSuggestion() {
+  const fd = new FormData(q('form[data-form="suggest"]'));
+  const s = models.suggest;
+  s.title = "Suggested ruler";
+  s.max_gap = Number(fd.get("suggest-gap"));
+  s.tolerance = Number(fd.get("suggest-tolerance"));
+  s.repeat_limit_px = Number(fd.get("suggest-repeat"));
+  s.lines = s.lines.map((line, i) => {
+    const reads = line.reads.map((_, k) => fd.get("suggest-read-" + i + "-" + k))
+      .map((v) => Number(v)).filter((v) => !Number.isNaN(v) && v > 0);
+    if (!reads.length) throw Error("Click or type at least one column for every line.");
+    return {name: fd.get("suggest-name-" + i), nm: Number(fd.get("suggest-nm-" + i)),
+      role: fd.get("suggest-role-" + i), reads};
+  });
+  if (!s.lines.some((line) => line.role === "check")) throw Error("Mark one line as the check.");
+  models.suggest = s;
+  return s;
 }
 function records() {
   const folio = models.records.map((r) => checked("Compare " + r.name, "compare-" + r.id,
@@ -306,6 +405,7 @@ function readStrip() {
 function readCalibration() {
   const fd = new FormData(q('form[data-form="calibration"]'));
   const data = {title:fd.get("title"), method:fd.get("method"), limit:fd.get("limit"),
+    excluded:models.calibration.excluded || [],
     anchors:models.calibration.anchors.map((old,i)=>({name:fd.get("anchor-name-"+i),
       column:Number(fd.get("anchor-column-"+i)),nm:Number(fd.get("anchor-nm-"+i)),weight:old.weight || 1}))};
   models.calibration = data;
@@ -402,6 +502,16 @@ async function stagePoint(event) {
   if (models.pick) {
     const current = models.pick;
     current.points.push(uv.map((v)=>Math.round(v*1e6)/1e6));
+    if (current.kind === "note") {
+      const line = models.suggest.lines[current.index];
+      line.reads = line.reads.slice(0, current.slot);
+      line.reads.push(current.points[0][0]);
+      current.points = [];
+      current.slot = line.reads.length;
+      if (line.reads.length >= (line.planned || 1)) models.pick = null;
+      render();
+      return;
+    }
     if (current.kind === "anchor") {
       models.calibration.anchors[current.index].column=current.points[0][0];
       models.expected="";
@@ -463,7 +573,8 @@ const actions = {
   source:async(key)=>{
     if (models.tab==="inspect" && tool()) rememberSettings();
     models.active=key;if(tool()?.sources[1]===1)models.selected=[key];
-    cleanReport();await loadSource();render();
+    cleanReport();models.suggest=null;models.suggestion=null;models.suggestionChart="";models.held=null;
+    await loadSource();render();
   },
   tab:async(key)=>{
     if (models.tab==="inspect" && tool()) rememberSettings();
@@ -493,6 +604,7 @@ const actions = {
   "anchor-pick":(key)=>markDraw("anchor",key),
   "strip-retain":()=>stripPreview(true),
   "calibration-retain":()=>fitPreview(true),
+  "suggest-held":async()=>{models.held=(await rpc(sourcePath()+"/calibration/held"));render();},
   "fit-import":()=>openDialog("Import ruler anchors",form("fit-import",
     '<label>Choose a UTF-8 anchor CSV<input type="file" name="anchors" accept=".csv" required></label>'+field("Calibration name","title","Imported wavelength table")+
     dropdown("Fit","method",[["linear","Linear least squares"],["interpolate","Interpolate marked lines"]],"linear")+
@@ -502,6 +614,24 @@ const actions = {
   "anchor-add":()=>{const c=readCalibration();if(c.anchors.length<28)c.anchors.push({name:"Line "+(c.anchors.length+1),column:.55,nm:550,weight:1});
     models.expected="";render();},
   "anchor-remove":()=>{const c=readCalibration();if(c.anchors.length>2)c.anchors.pop();models.expected="";render();},
+  "suggest-click":(key)=>{const [i,k]=String(key).split(":").map(Number);
+    rememberSuggestion();
+    const line=models.suggest.lines[i];
+    line.planned = k < line.reads.length ? 1 : line.reads.length + 2;
+    models.pick={kind:"note",key:"",index:i,points:[],slot:k};
+    models.prepOverlay="";render();announce("Click the known line twice on the camera image.");},
+  "suggest-add":()=>{rememberSuggestion();
+    if(models.suggest.lines.length<34)models.suggest.lines.push({name:"Line "+(models.suggest.lines.length+1),nm:550,reads:[],role:"fit"});render();},
+  "suggest-remove":()=>{rememberSuggestion();
+    if(models.suggest.lines.length>3)models.suggest.lines.pop();render();},
+  "suggest-use":()=>{
+    const settings=models.suggestion.settings;
+    models.calibration={title:settings.title, method:settings.method, limit:settings.limit,
+      excluded:settings.excluded || [],
+      anchors:settings.anchors.map((a)=>({name:a.name,column:a.column,nm:a.nm,weight:a.weight}))};
+    models.expected="";models.prepOverlay="";
+    render();announce("Suggested ruler loaded into the editor. Preview it, then save.");
+  },
   bookmark:()=>openDialog("Bookmark source point",form("bookmark",field("Bookmark name","name","","required")+
     area("Reading notes","message",""),"Save bookmark")),
   "bookmark-open":async(key)=>{
@@ -537,6 +667,15 @@ const forms = {
   inspect:(fd,form)=>runInspection(form),
   strip:()=>stripPreview(false),
   calibration:()=>fitPreview(false),
+  suggest:async()=>{
+    const s=readSuggestion();
+    const output=await post(sourcePath()+"/calibration/suggest",{revision:source().revision,
+      lines:s.lines, methods:s.methods, limit:s.limit, title:s.title, max_gap:s.max_gap,
+      tolerance:s.tolerance, repeat_limit_px:s.repeat_limit_px});
+    models.suggestion=output.suggestion; models.suggestionChart=output.chart;
+    models.prepOverlay=output.overlay; models.pick=null;
+    render();announce("Suggested ruler ready — review the disabled spans.");
+  },
   retain:async(fd)=>{dialog.close();await retainReading(fd.get("name"));},
   review:async(fd)=>{const key=models.report.id;await post("/api/records/"+key+"/review",{message:fd.get("message")});
     dialog.close();await showRecord(key);},

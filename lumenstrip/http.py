@@ -22,6 +22,7 @@ from .fitfile import MAX_CSV, export_fit, import_fit
 from .library import Library
 from .proofs import camera_health, folio_page, record_health, studio_folio
 from .strip import Trace
+from .suggest import Proposal, chart as suggest_chart, influence, recommend
 from .tools import TOOLS
 from .view import plot_anchor_view, strip_overlay
 from .witness import Request, bookmark_replay, replay, saved_source
@@ -194,6 +195,33 @@ def captures(app, lab, capacity):
             retained = lab.add_fit(key, rev, fit, doc.get("expected")) if persist else None
             return {"preview_key": fingerprint, "fit": fit.description(source.camera.size[0]),
                     "settings": fit.public(), "result": retained, "overlay": base_image(encode_png(geometry))}
+
+    @app.post("/api/sources/<key>/calibration/suggest")
+    def suggest_axis(key):
+        body = body_fields("Ruler suggestion", ("revision", "lines", "methods", "limit", "title",
+                                                "max_gap", "tolerance", "repeat_limit_px"))
+        rev = whole(body.get("revision"), "Revision", 1, 1000000)
+        proposal = Proposal.parse({key: value for key, value in body.items() if key != "revision"})
+        with capacity:
+            source = live_source(lab, key)
+            if source.record["revision"] != rev:
+                raise Problem("Reload the camera record before suggesting a ruler.", 409)
+            found = recommend(proposal, source.camera.size[0])
+            trace = Trace.read(source.camera, source.strip, found["fit_object"])
+            geometry = plot_anchor_view(source.camera, trace, found["fit_object"].anchors)
+            return {"suggestion": {k: v for k, v in found.items() if k != "fit_object"},
+                    "settings": found["settings"], "fit_object": found["fit_object"].public(),
+                    "chart": base_image(encode_png(suggest_chart(found["chosen"]).image)),
+                    "overlay": base_image(encode_png(geometry))}
+
+    @app.get("/api/sources/<key>/calibration/held")
+    def held_axis(key):
+        source = live_source(lab, key)
+        if source.fit is None:
+            raise Problem("Select a saved wavelength ruler before inspecting it.", 409)
+        return {"fit": source.fit.description(source.camera.size[0]),
+                "influence": influence(source.fit, source.camera.size[0]),
+                "settings": source.fit.public()}
 
     @app.get("/api/sources/<key>/calibration.csv")
     def download_axis(key):

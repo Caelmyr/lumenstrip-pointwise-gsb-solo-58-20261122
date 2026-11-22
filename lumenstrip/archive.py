@@ -97,6 +97,9 @@ def sheet(record: dict, encoded_assets: dict[str, str] | None = None,
         url = f'<a href="{escape(saved, quote=True)}">Camera original</a>' if saved else "Camera original omitted"
         synthetic = " · Synthetic input" if r["meta"].get("synthetic") else ""
         calibration = escape(fit["calibration"]["title"]) if fit else "Native columns"
+        gaps = len(fit["calibration"].get("excluded") or []) if fit else 0
+        if gaps:
+            calibration += f" · {gaps} unmeasured interval{'s' if gaps > 1 else ''}"
         source_notes.append(f"<li><strong>{label}</strong> · {calibration}{synthetic} · {url}"
                             f"<br><small>{escape(image['name'])} / {image['width']} × {image['height']}"
                             f" / {r['meta']['exposure_ms']} ms</small><br><code>{hash_text}</code></li>")

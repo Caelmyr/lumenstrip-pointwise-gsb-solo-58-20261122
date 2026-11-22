@@ -39,17 +39,29 @@ class Fit:
     title: str
     slope: float
     intercept: float
+    excluded: tuple[tuple[float, float], ...] = ()
 
     @classmethod
     def parse(cls, value: dict) -> Fit:
         data = mapping(value, "Wavelength calibration")
-        allowed(data, {"method", "anchors", "limit", "title"}, "calibration")
+        allowed(data, {"method", "anchors", "limit", "title", "excluded"}, "calibration")
         method = choice(data.get("method", "linear"), MODES, "Calibration method")
         limit = choice(data.get("limit", "anchors"), ("anchors", "frame"), "Axis support")
         name = plain_text(data.get("title", "Wavelength calibration"), "Calibration name", 86)
         anchors = sorted((Anchor.parse(v, i) for i, v in
                           enumerate(seq(data.get("anchors"), "Known wavelengths", 2, 28))),
                          key=lambda a: a.column)
+        excluded = []
+        for i, pair in enumerate(seq(data.get("excluded") or [], "Unmeasured intervals", 0, 12)):
+            low, high = seq(pair, f"Unmeasured interval {i + 1}", 2, 2)
+            a = real(low, f"Unmeasured interval {i + 1} start", 0, 1)
+            b = real(high, f"Unmeasured interval {i + 1} end", 0, 1)
+            if b - a < 1e-6:
+                raise Problem("An unmeasured interval must be wider than one millionth of the image.")
+            excluded.append((a, b))
+        excluded.sort()
+        if any(b > c for (_, b), (c, _) in zip(excluded, excluded[1:])):
+            raise Problem("Unmeasured intervals must not overlap.")
         u = np.asarray([a.column for a in anchors])
         w = np.asarray([a.wavelength for a in anchors])
         weights = np.asarray([a.weight for a in anchors])
@@ -61,7 +73,8 @@ class Fit:
         mean_u = np.average(u, weights=weights)
         mean_w = np.average(w, weights=weights)
         slope = np.dot(weights * (u - mean_u), w - mean_w) / np.dot(weights, (u - mean_u) ** 2)
-        return cls(method, tuple(anchors), limit, name, float(slope), float(mean_w - slope * mean_u))
+        return cls(method, tuple(anchors), limit, name, float(slope), float(mean_w - slope * mean_u),
+                   tuple(excluded))
 
     @property
     def columns(self) -> tuple[float, float]:
@@ -69,8 +82,10 @@ class Fit:
 
     @property
     def wavelength_extent(self) -> tuple[float, float]:
-        columns = list(self.columns) if self.limit == "anchors" else [0., 1.]
-        values, supported = self.mapped(np.asarray(columns))
+        lower, upper = self.columns if self.limit == "anchors" else (0., 1.)
+        values, supported = self.mapped(np.asarray([lower, upper]))
+        if not supported.any():
+            return float(sorted(values)[0]), float(sorted(values)[-1])
         return tuple(sorted(float(v) for v in values[supported]))
 
     def _raw(self, columns: np.ndarray) -> np.ndarray:
@@ -90,23 +105,29 @@ class Fit:
         columns = np.asarray(columns, np.float64)
         lower, upper = self.columns if self.limit == "anchors" else (0., 1.)
         supported = (columns >= lower - 1e-12) & (columns <= upper + 1e-12)
+        for a, b in self.excluded:
+            supported &= ~((columns >= a - 1e-12) & (columns <= b + 1e-12))
         mapped = self._raw(columns)
         return np.where(supported, mapped, np.nan), supported
 
     def inverse(self, nm: float) -> float | None:
+        """Detector column for a wavelength, or None when that wavelength is not measured."""
         source = np.asarray([a.column for a in self.anchors] if self.limit == "anchors" else
                             [0., *[a.column for a in self.anchors if 0 < a.column < 1], 1.])
         mapped = self._raw(source)
-        if mapped[-1] < mapped[0]:
-            mapped = mapped[::-1]
-            source = source[::-1]
+        order = np.argsort(mapped)
+        source, mapped = source[order], mapped[order]
         if nm < mapped[0] or nm > mapped[-1]:
             return None
-        return float(np.interp(nm, mapped, source))
+        column = float(np.interp(nm, mapped, source))
+        if any(a - 1e-12 <= column <= b + 1e-12 for a, b in self.excluded):
+            return None
+        return column
 
     def public(self) -> dict:
         return {"title": self.title, "method": self.method, "limit": self.limit,
-                "anchors": [a.public() for a in self.anchors]}
+                "anchors": [a.public() for a in self.anchors],
+                "excluded": [list(pair) for pair in self.excluded]}
 
     def description(self, width: int) -> dict:
         u = np.asarray([a.column for a in self.anchors])
@@ -123,6 +144,7 @@ class Fit:
                 "maximum_anchor_error_nm": rounded(np.max(np.abs(residual))),
                 "nm_per_pixel_linear_fit": rounded(self.slope / width), "reversed": self.slope < 0,
                 "mapped_extent_nm": [rounded(lower), rounded(upper)],
+                "unmeasured_intervals": len(self.excluded),
                 "anchors": details}
 
     def coordinates_rows(self, width: int, count: int = 65) -> list[dict]:

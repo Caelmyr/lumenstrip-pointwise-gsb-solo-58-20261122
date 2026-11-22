@@ -89,3 +89,9 @@ dialog .buttons{justify-content:flex-end}
 .fit-entry{border-top:1px solid var(--line);padding:.32rem 0}
 @media(max-width:1110px){.workspace{grid-template-columns:minmax(190px,.9fr) minmax(320px,2.1fr)}.right{grid-column:1/-1}}
 @media(max-width:690px){main{padding:12px}.bar{padding:0 12px}.workspace{display:block}.workspace .panel,.workspace .stage{margin:8px 0}.home{margin:24px 0}.fields{grid-template-columns:1fr}}
+
+.suggest-line{border:1px solid var(--line);border-radius:7px;padding:.45rem;margin:.45rem 0}
+.suggest-line .fields{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+.read-slot{display:inline-flex;align-items:center;gap:4px;margin-right:.4rem}
+.read-slot input{width:7.2rem}
+.mini{padding:.15rem .4rem;font-size:.72rem}
