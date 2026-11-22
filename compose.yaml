@@ -1,0 +1,22 @@
+name: solo61-lumenstrip
+services:
+  web:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${LUMENSTRIP_BASE_IMAGE:-python:3.11-slim}
+    image: ${LUMENSTRIP_IMAGE:-solo61-lumenstrip:1.0}
+    init: true
+    restart: unless-stopped
+    network_mode: bridge
+    ports:
+      - "127.0.0.1:${LUMENSTRIP_PORT:-19964}:8000"
+    volumes:
+      - sessions:/var/lib/lumenstrip
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).read()"]
+      interval: 4s
+      timeout: 4s
+      retries: 9
+volumes:
+  sessions:
