@@ -86,9 +86,11 @@ function table(rows) {
   const names = [...new Set(rows.slice(0, 50).flatMap(Object.keys))].slice(0, 18);
   return '<div class="table-wrap"><table><thead><tr>' + names.map((k) => `<th>${esc(title(k))}</th>`).join("") +
     "</tr></thead><tbody>" + rows.slice(0, 160).map((r) => {
+    const paired = r.source_1_uv && r.source_2_uv && r.applied_shift !== undefined;
     const point = r.source_uv || r.start_uv || r.source_1_uv;
     const value = r.position ?? r.x_axis ?? r.crest_axis;
-    const tag = point ? ` class="clickable" data-act="row-point" data-key="${esc(JSON.stringify(point))}"`
+    const tag = paired ? ` class="clickable" data-act="reg-row" data-key="${esc(JSON.stringify([r.position, r.applied_shift]))}"`
+      : point ? ` class="clickable" data-act="row-point" data-key="${esc(JSON.stringify(point))}"`
       : typeof value === "number" ? ` class="clickable" data-act="row-axis" data-key="${value}"` : "";
     return `<tr${tag}>${names.map((k) => `<td>${esc(display(r[k]))}</td>`).join("")}</tr>`;
   }).join("") + "</tbody></table></div>";
@@ -156,7 +158,9 @@ function frame() {
   const figureTitle = viewing && chosen ? chosen.title : source()?.meta.title || "Camera stage";
   const showSource = viewing && models.report?.sources?.length > 1;
   const images = assetList().filter((a) => a.mime.startsWith("image/"));
-  const label = models.pick ? "Click the requested position on the camera image." : "";
+  const label = models.pick?.kind === "reg-anchor"
+    ? "Click the same unchanged narrow line on this frame."
+    : models.pick ? "Click the requested position on the camera image." : "";
   return `<section class="stage"><h2>${esc(figureTitle)}</h2>${showSource ? dropdown("Point evidence source","report-source",
     models.report.sources.map((s,i) => [String(i),s.meta.title]),String(models.reportSource)) : ""}
     ${img ? `<div class="scene ${models.pick ? "is-picking" : ""}"><div class="target">
@@ -170,6 +174,18 @@ function witnessView() {
   const w = models.witness;
   if (!w) return "";
   const result = w.reading;
+  if (result.state === "paired original positions") {
+    const pair = [
+      ["First frame", result.first],
+      ["Second frame (aligned position)", result.second],
+    ].map(([label, part]) => `<div class="pair-col"><small>${esc(label)} · ${esc(part.title)}</small>
+      ${metrics({requested_axis:part.requested_axis, sampled_axis:part.sampled_axis, state:part.state,
+        column:part.pixel?.[0], row:part.pixel?.[1]})}</div>`).join("");
+    return `<section class="measure"><h3>Paired original positions</h3>
+      <p class="tiny">Both native pixels that were actually compared at this corrected axis position; the frozen shift ${esc(result.applied_shift)} was applied, not re-estimated.</p>
+      <div class="pair-grid">${pair}</div>
+      ${w.witness ? `<img class="inline-witness pair-image" alt="Magnified original pixels from both frames" src="${esc(w.witness)}">` : ""}</section>`;
+  }
   return `<section class="measure"><h3>Camera witness</h3>${metrics({state:result.state, requested_axis:result.requested_axis,
     sampled_axis:result.sampled_axis, source:result.source?.meta.title, column:result.pixel?.[0], row:result.pixel?.[1]})}
     ${w.witness ? `<img class="inline-witness" alt="Magnified actual source pixels" src="${esc(w.witness)}">` : ""}
@@ -178,6 +194,7 @@ function witnessView() {
     ${folds("Exact native evidence", result.column_result || result)}</section>`;
 }
 function opt(spec, value) {
+  if (spec.key === "anchors" && models.tool === "anchor-registration") return registrationAnchorField(value);
   const {key, title:label, kind} = spec;
   if (kind === "number") return nfield(label + (spec.units ? " (" + spec.units + ")" : ""),key,value,spec.step);
   if (kind === "boolean") return checked(label,key,value);
@@ -185,9 +202,39 @@ function opt(spec, value) {
   const more = kind === "crop" ? button("Mark two corners","tool-draw",key) : "";
   return `<div class="wide">${area(label,key,pretty(value),kind === "crop" ? 3 : 4)}${more}</div>`;
 }
+function registrationAnchorField(value) {
+  const anchors = Array.isArray(value) && value.length ? value : [];
+  const rows = anchors.map((a,i) => `<div class="reg-anchor" data-reg-index="${i}">
+    ${field("Anchor line name",`reg-name-${i}`,a.name ?? "Stable line")}
+    <label>First frame column<input name="reg-a-${i}" type="number" step="0.000001" min="0.0005" max="0.9995" value="${esc(a.source_1_column ?? "")}"></label>
+    ${button("Pick on first","reg-pick",`${i}|a`)}
+    <label>Second frame column<input name="reg-b-${i}" type="number" step="0.000001" min="0.0005" max="0.9995" value="${esc(a.source_2_column ?? "")}"></label>
+    ${button("Pick on second","reg-pick",`${i}|b`)}
+  </div>`).join("");
+  return `<div class="wide reg-anchors"><p class="tiny">Mark narrow lines that did not change, once on each frame. These anchors measure frame displacement only; they never flatten a real line change.</p>
+    ${rows}
+    <div class="buttons">${button("Add anchor line","reg-add")}${button("Remove last","reg-remove")}</div></div>`;
+}
+function registrationEditor(current) {
+  const specs = current.settings.filter((s) => s.key !== "anchors");
+  const anchorSpec = current.settings.find((s) => s.key === "anchors");
+  const editing = '<div class="fields">' + registrationAnchorField(models.fields.anchors ?? anchorSpec.default) +
+    specs.map((spec) => opt(spec,models.fields[spec.key] ?? spec.default)).join("") + "</div>";
+  return `<aside class="panel right"><h2>Inspect</h2><label>Reading tool<select id="tool-selector">${toolGroups()}</select></label>
+    <p class="help">${esc(current.description)}</p>
+    <p class="tiny">Choose two camera images with the checkboxes. The first is the reference frame.</p>
+    ${form("inspect",editing,"Run reading")}${resultView()}</aside>`;
+}
+function toolGroups() {
+  const groups = [...new Set(models.tools.map((t) => t.section))];
+  const current = tool();
+  return groups.map((g) => `<optgroup label="${esc(g)}">${models.tools.filter((t) => t.section === g)
+    .map((t) => `<option value="${t.id}" ${current.id === t.id ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</optgroup>`).join("");
+}
 function inspect() {
   if (!source() || !tool()) return '<aside class="panel right"><h2>Inspect</h2><p class="tiny">Choose a camera source.</p></aside>';
   const current = tool();
+  if (current.id === "anchor-registration") return registrationEditor(current);
   const groups = [...new Set(models.tools.map((t) => t.section))];
   const selectors = groups.map((g) => `<optgroup label="${esc(g)}">${models.tools.filter((t) => t.section === g)
     .map((t) => `<option value="${t.id}" ${current.id === t.id ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</optgroup>`).join("");
@@ -289,6 +336,15 @@ function rememberSettings() {
   const fd = new FormData(editor);
   const cfg = {};
   for (const spec of tool().settings) {
+    if (spec.key === "anchors" && tool().id === "anchor-registration") {
+      const anchors = (models.fields.anchors ?? spec.default ?? []);
+      cfg.anchors = anchors.map((anchor, i) => ({
+        name: fd.get("reg-name-" + i) || anchor.name || ("Stable line " + (i + 1)),
+        source_1_column: Number(fd.get("reg-a-" + i)),
+        source_2_column: Number(fd.get("reg-b-" + i)),
+      }));
+      continue;
+    }
     const value = fd.get(spec.key);
     cfg[spec.key] = spec.kind === "number" ? Number(value) : spec.kind === "boolean" ? fd.has(spec.key)
       : spec.kind === "choice" ? value : JSON.parse(value);
@@ -368,6 +424,18 @@ async function showRecord(key) {
   const output = await rpc("/api/records/"+key);
   applyReport(output);models.tab="records";render();
 }
+async function pairedWitness(axis, appliedShift) {
+  const report = models.report;
+  if (!report?.sources?.length) return;
+  const doc = {on:"paired-axis", value:axis, source_index:0, source_index_2:1, applied_shift:appliedShift};
+  const url = report.id ? "/api/records/"+report.id+"/probe"
+    : studioPath()+"/tools/"+report.tool+"/probe";
+  const response = await post(url, report.id ? doc : {witness:doc, order:report.order});
+  models.witness = response;
+  const priorScroll = window.scrollY;
+  render();
+  window.scrollTo(0,priorScroll);
+}
 async function pointWitness(space, value, forcedIndex) {
   const report = ["inspect","records"].includes(models.tab) ? models.report : null;
   const index = forcedIndex ?? models.reportSource;
@@ -405,6 +473,13 @@ async function stagePoint(event) {
     if (current.kind === "anchor") {
       models.calibration.anchors[current.index].column=current.points[0][0];
       models.expected="";
+    } else if (current.kind === "reg-anchor") {
+      rememberSettings();
+      const anchors = models.fields.anchors ?? [];
+      const entry = anchors[current.index] || {name:"Stable line"};
+      entry[current.side === "a" ? "source_1_column" : "source_2_column"] = current.points[0][0];
+      anchors[current.index] = entry;
+      models.fields.anchors = anchors;
     } else if (current.points.length < 2) {
       svgPoints();return;
     } else if (current.kind === "strip") models.strip.endpoints=current.points;
@@ -415,6 +490,15 @@ async function stagePoint(event) {
   }
   const r = models.report;
   const probe = ["inspect","records"].includes(models.tab) && r ? r.probes?.[models.asset] : null;
+  if (probe?.kind === "paired-axis") {
+    const [left,top,right,bottom] = probe.plot_uv;
+    if (uv[0] < left || uv[0] > right || uv[1] < top || uv[1] > bottom) return;
+    const axis = probe.x[0]+(uv[0]-left)/(right-left)*(probe.x[1]-probe.x[0]);
+    const nearest = probe.axis_grid.reduce((best,value) =>
+      Math.abs(value - axis) < Math.abs(best - axis) ? value : best, probe.axis_grid[0]);
+    const gridIndex = probe.axis_grid.indexOf(nearest);
+    return pairedWitness(nearest, probe.applied_shift[gridIndex]);
+  }
   if (probe?.kind === "axis") {
     const [left,top,right,bottom] = probe.plot_uv;
     if (uv[0] < left || uv[0] > right || uv[1] < top || uv[1] > bottom) return;
@@ -488,9 +572,38 @@ const actions = {
   },
   "row-point":(key)=>pointWitness("camera",JSON.parse(key)),
   "row-axis":(key)=>pointWitness("axis",Number(key)),
+  "reg-row":(key)=>{const [axis,shift]=JSON.parse(key);return pairedWitness(axis,shift);},
   "strip-draw":()=>markDraw("strip"),
   "tool-draw":(key)=>markDraw("tool",key),
   "anchor-pick":(key)=>markDraw("anchor",key),
+  "reg-pick":(key)=>{
+    const [indexText,side]=key.split("|");
+    const index=Number(indexText);
+    rememberSettings();
+    cleanReport();
+    const frameSource = side === "a" ? models.selected[0] : models.selected[1];
+    if (!frameSource) { announce("Choose two camera images before picking anchor lines.", true); return; }
+    models.active = frameSource;
+    models.reportSource = side === "a" ? 0 : 1;
+    models.pick = {kind:"reg-anchor",index,side,points:[]};
+    render();
+  },
+  "reg-add":()=>{
+    rememberSettings();
+    const anchors = models.fields.anchors ?? [];
+    if (anchors.length >= 4) { announce("Use at most four anchor lines.", true); return; }
+    anchors.push({name:"Stable line " + (anchors.length + 1), source_1_column:0.5, source_2_column:0.5});
+    models.fields.anchors = anchors;
+    render();
+  },
+  "reg-remove":()=>{
+    rememberSettings();
+    const anchors = models.fields.anchors ?? [];
+    if (anchors.length <= 2) { announce("Keep at least two anchor lines.", true); return; }
+    anchors.pop();
+    models.fields.anchors = anchors;
+    render();
+  },
   "strip-retain":()=>stripPreview(true),
   "calibration-retain":()=>fitPreview(true),
   "fit-import":()=>openDialog("Import ruler anchors",form("fit-import",

@@ -13,6 +13,7 @@ from .noise import noise_windows, sidebands
 from .continuum import envelopes, flatness, slope_edges
 from .instrument import dark_field, exposure_response, trace_placement
 from .comparison import band_comparison, drift, overlay, repeatability, transmission
+from .registration import anchor_registration
 from .readings import aperture, calibration_check, diagnostics, height_scan, spectrum, support_audit, tiles
 from .spectral import bands, crest_report, visible_balance
 
@@ -120,6 +121,16 @@ TOOLS = {tool.name: tool for tool in (
          "Check nearby offsets by correlation while retaining both original rulers.",
          (number("count", "Grid samples", 320), number("range", "Search either side", 12),
           number("min_common", "Minimum shared support", 40)), drift),
+    Tool("anchor-registration", "Anchor line registration", "Compare", 2, 2,
+         "Mark unchanged narrow lines on both frames to correct the local frame displacement while keeping the raw difference.",
+         (structured("anchors", "Unchanged anchor lines (one column per frame)", [
+             {"name": "Stable line 1", "source_1_column": 0.25, "source_2_column": 0.27},
+             {"name": "Stable line 2", "source_1_column": 0.72, "source_2_column": 0.74}]),
+          number("count", "Grid samples", 380), number("window", "Correlation half window", 14, 1),
+          number("range", "Shift search either side", 8, 1),
+          number("min_correlation", "Minimum anchor correlation", 0.55, 0.05),
+          number("disagreement", "Anchor disagreement limit", 2, 1, "samples"),
+          RATE, BANDS), anchor_registration),
     Tool("source-coverage", "Shared wavelength support", "Compare", 2, 4,
          "Measure the individual and shared extents of observed wavelengths.",
          (BANDS, number("samples", "Grid samples", 380),

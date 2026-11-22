@@ -27,6 +27,7 @@ Open http://127.0.0.1:19964. Set `LUMENSTRIP_PORT` and pass a different Compose 
 - Read sampled spectra, source-coordinate evidence, detector channels and channel clipping.
 - Measure emission peaks and observed widths, broad band shapes, point/line energy, signal distributions and supported integration.
 - Compare detector exposure response, repeat spread, shifts and common wavelength support.
+- Register two repeat frames from unchanged anchor lines: correct the local frame displacement with a constant or interpolated linear field, keep the raw difference beside the corrected residual, and mark positions outside the anchor hull pending check instead of extrapolating.
 - Analyze open reference and dark-corrected filter transmission, density and requested pass/stop bands independently.
 - Inspect detector spots and background asymmetry, and compare simultaneously captured parallel strips.
 - Generate and import a clearly labelled synthetic detector scene.

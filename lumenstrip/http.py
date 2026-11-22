@@ -24,7 +24,7 @@ from .proofs import camera_health, folio_page, record_health, studio_folio
 from .strip import Trace
 from .tools import TOOLS
 from .view import plot_anchor_view, strip_overlay
-from .witness import Request, bookmark_replay, replay, saved_source
+from .witness import Request, bookmark_replay, paired_replay, replay, saved_source
 
 
 def json_body(label):
@@ -246,6 +246,8 @@ def captures(app, lab, capacity):
     def probe_camera(key):
         selected = Request.parse(json_body("Camera witness"))
         with capacity:
+            if selected.space == "paired-axis":
+                raise Problem("Paired registration witnesses run from a two-source reading.")
             result, image = replay(live_source(lab, key), selected)
         return {"reading": result, "witness": base_image(image) if image is not None else None}
 
@@ -280,6 +282,21 @@ def reading(app, lab, capacity):
             result = _render_tool(lab, key, tool, order)
         return result, 201 if order.retain else 200
 
+    @app.post("/api/stations/<key>/tools/<name>/probe")
+    def probe_reading(key, name):
+        from .bench import Bench
+        del name
+        body = json_body("Reading witness")
+        selected = Request.parse(body.get("witness", body))
+        order = Order.parse(mapping(body.get("order", body), "Reading order"))
+        with capacity:
+            bench = Bench.load(lab, key, order)
+            if selected.space == "paired-axis":
+                result, image = paired_replay(bench.sources, selected)
+            else:
+                result, image = replay(bench.sources[selected.source_index], selected)
+        return {"reading": result, "witness": base_image(image) if image is not None else None}
+
     @app.get("/api/records/<key>")
     def saved_record(key):
         return lab.record(key)
@@ -312,11 +329,15 @@ def reading(app, lab, capacity):
     def saved_probe(key):
         selected = Request.parse(json_body("Saved source witness"))
         record = lab.record(key)
-        try:
-            source = record["sources"][selected.source_index]
-        except IndexError:
-            raise Problem("The saved reading has no observation in that position.", 404) from None
         with capacity:
+            if selected.space == "paired-axis":
+                sources = tuple(saved_source(lab, snapshot) for snapshot in record["sources"])
+                result, image = paired_replay(sources, selected)
+                return {"reading": result, "witness": base_image(image) if image is not None else None}
+            try:
+                source = record["sources"][selected.source_index]
+            except IndexError:
+                raise Problem("The saved reading has no observation in that position.", 404) from None
             result, image = replay(saved_source(lab, source), selected)
         return {"reading": result, "witness": base_image(image) if image is not None else None}
 
