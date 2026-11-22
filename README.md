@@ -16,7 +16,7 @@ Open http://127.0.0.1:19964. Set `LUMENSTRIP_PORT` and pass a different Compose 
 2. Open **Strip**, click two centered points on the image, adjust the row width or sidebands and preview the selected detector pixels. Save the geometry when it matches the plate.
 3. Under **Wavelength**, enter at least two known wavelengths and click their actual detector columns. Choose linear or line-by-line interpolation and set whether the fit extends outside the anchors. Preview and save the ruler. Ruler CSV import uses relative columns, native pixel columns, or both.
 4. Open **Inspect**, select **Strip spectrum**, and run the reading. Click the plotted signal to see its native camera pixels and the actual rows contributing. Other tools use the same versioned input.
-5. For **Filter transmission**, tick sample, open reference and optional dark reference in that order. **Aligned repeats** keeps each selected spectrum independent.
+5. For **Filter transmission**, tick sample, open reference and optional dark reference in that order. **Aligned repeats** keeps each selected spectrum independent. **Two lamps in one capture** takes the mixed photograph first, then each single-lamp photograph. It estimates each lamp's share only where the single-lamp images clearly separate; if only the look-alike stretch is readable it reports the combined readable light alone and says why. The band table repeats the original integration per window with each lamp's light, the model floor and the light left unexplained.
 6. Choose **Retain reading** to keep the tool settings, source versions, chart and CSV. The retained reading is still tied to the original bytes when geometry or fit versions change. Download a portable evidence packet or reopen an earlier measurement from **Retained**. **Check evidence ZIP** checks the manifest, actual member bytes and declared original hashes.
 
 ## Normal capabilities
@@ -27,6 +27,7 @@ Open http://127.0.0.1:19964. Set `LUMENSTRIP_PORT` and pass a different Compose 
 - Read sampled spectra, source-coordinate evidence, detector channels and channel clipping.
 - Measure emission peaks and observed widths, broad band shapes, point/line energy, signal distributions and supported integration.
 - Compare detector exposure response, repeat spread, shifts and common wavelength support.
+- Estimate each lamp's share of a shared capture from two single-lamp photographs, without trusting only the brightest crest; report combined light when the lamps cannot be separated, and keep the unexplained light visible.
 - Analyze open reference and dark-corrected filter transmission, density and requested pass/stop bands independently.
 - Inspect detector spots and background asymmetry, and compare simultaneously captured parallel strips.
 - Generate and import a clearly labelled synthetic detector scene.

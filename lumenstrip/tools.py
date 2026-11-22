@@ -15,6 +15,7 @@ from .instrument import dark_field, exposure_response, trace_placement
 from .comparison import band_comparison, drift, overlay, repeatability, transmission
 from .readings import aperture, calibration_check, diagnostics, height_scan, spectrum, support_audit, tiles
 from .spectral import bands, crest_report, visible_balance
+from .twolamp import two_lamp
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,17 @@ GUARDS = (number("low", "Shadow code", .02, .005), number("high", "Clip code", .
 RATE = boolean("per_ms", "Divide by exposure time", False)
 BANDS = structured("bands", "Named band intervals", [])
 TOOLS = {tool.name: tool for tool in (
+    Tool("two-lamp-mixture", "Two lamps in one capture", "Compare", 3, 3,
+         "Use two single-lamp photographs to estimate each lamp's share of a capture where both were lit. "
+         "Give the mixed image first, then the two single-lamp images. If only the look-alike middle is "
+         "readable, only the combined amount is reported.",
+         (structured("window", "Analysis window", None),
+          structured("separation", "Separation windows (one per single lamp)", []),
+          number("distinctness", "Clear dominance margin", .35, .05),
+          number("min_coverage", "Minimum dominance coverage", .6, .05),
+          number("min_share", "Smallest believable lamp share", .02, .005),
+          number("tolerance", "Largest share relative error", .25, .05),
+          BANDS, RATE), two_lamp),
     Tool("spectrum", "Strip spectrum", "Strip", 1, 1,
          "Read native camera samples along the retained strip geometry.",
          (boolean("show_native", "Show original strip level", True),

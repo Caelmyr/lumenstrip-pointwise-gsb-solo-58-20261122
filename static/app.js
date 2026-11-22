@@ -183,7 +183,8 @@ function opt(spec, value) {
   if (kind === "boolean") return checked(label,key,value);
   if (kind === "choice") return dropdown(label,key,spec.choices.map((v) => [v,title(v)]),value);
   const more = kind === "crop" ? button("Mark two corners","tool-draw",key) : "";
-  return `<div class="wide">${area(label,key,pretty(value),kind === "crop" ? 3 : 4)}${more}</div>`;
+  const shown = Array.isArray(value) && !value.length ? "[]" : pretty(value);
+  return `<div class="wide">${area(label,key,shown,kind === "crop" ? 3 : 4)}${more}</div>`;
 }
 function inspect() {
   if (!source() || !tool()) return '<aside class="panel right"><h2>Inspect</h2><p class="tiny">Choose a camera source.</p></aside>';
@@ -204,7 +205,11 @@ function resultView() {
   const controls = r.id ? `<a class="download" target="_blank" href="/api/records/${r.id}/sheet">Print sheet</a>
     <a class="download" href="/api/records/${r.id}/download">Evidence ZIP</a><a class="download" href="/api/records/${r.id}/download?originals=0">Measurements only</a>
     ${button("Add review note","review")} ${button("Check saved sources","check-record")}` : button("Retain reading","retain","","primary");
-  return `<section class="measure"><h3>${esc(r.name || r.title)}</h3><p class="tiny">${esc(r.summary)}</p>${metrics(r.metrics)}
+  const estimate = r.metrics?.estimate && r.metrics?.estimate_reason
+    ? `<p class="warning">${esc(r.metrics.estimate)} — ${esc(r.metrics.estimate_reason)}</p>` :
+    r.metrics?.estimate === "each lamp's share"
+      ? `<p class="tiny">${esc(r.metrics.estimate)} · ${esc(r.metrics.lamp_1)} ${esc(display(r.metrics.lamp_1_share))}, ${esc(r.metrics.lamp_2)} ${esc(display(r.metrics.lamp_2_share))}</p>` : "";
+  return `<section class="measure"><h3>${esc(r.name || r.title)}</h3><p class="tiny">${esc(r.summary)}</p>${estimate}${metrics(r.metrics)}
   <div class="buttons measure">${controls}${files}</div><details><summary>Measured rows · ${r.row_count}</summary>${table(r.rows)}</details>
   ${folds("Inputs and source versions",r.sources)}${folds("All measurements",r.metrics)}
   ${(r.warnings||[]).map((w) => `<p class="warning">${esc(w)}</p>`).join("")}

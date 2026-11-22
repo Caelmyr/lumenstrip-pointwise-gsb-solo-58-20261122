@@ -218,6 +218,23 @@ def plot_anchor_view(camera: Camera, trace: Trace, anchors) -> Image.Image:
     return image
 
 
+def support_map(camera: Camera, trace: Trace, states: np.ndarray) -> Image.Image:
+    image = strip_overlay(camera, trace)
+    draw = ImageDraw.Draw(image)
+    points = _point_geom(camera, image, trace.plan.x, trace.plan.centers)
+    for flag, color, width in ((1, AMBER, 4), (2, GREEN, 6), (3, CYAN, 6)):
+        for run in contiguous(states == flag):
+            positions = points[run]
+            if len(positions) > 1:
+                draw.line(positions, fill=color, width=width)
+            elif positions:
+                x, y = positions[0]
+                draw.ellipse((x - 2, y - 2, x + 2, y + 2), fill=color)
+    draw.text((7, 7), "amber: readable / green + cyan: used to separate the lamps",
+              font=font(11), fill=TEXT)
+    return image
+
+
 def strip_heat(camera: Camera, trace: Trace) -> Image.Image:
     plan = trace.plan
     min_row = max(0, int(min(plan.adjacent.min(), plan.middle.min())))
