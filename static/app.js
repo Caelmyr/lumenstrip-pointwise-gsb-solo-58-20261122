@@ -88,7 +88,8 @@ function table(rows) {
     "</tr></thead><tbody>" + rows.slice(0, 160).map((r) => {
     const point = r.source_uv || r.start_uv || r.source_1_uv;
     const value = r.position ?? r.x_axis ?? r.crest_axis;
-    const tag = point ? ` class="clickable" data-act="row-point" data-key="${esc(JSON.stringify(point))}"`
+    const origin = r.source_index ?? r.dominant_source_index;
+    const tag = point ? ` class="clickable" data-act="row-point" data-key="${esc(JSON.stringify(origin != null ? {uv:point, source_index:origin} : point))}"`
       : typeof value === "number" ? ` class="clickable" data-act="row-axis" data-key="${value}"` : "";
     return `<tr${tag}>${names.map((k) => `<td>${esc(display(r[k]))}</td>`).join("")}</tr>`;
   }).join("") + "</tbody></table></div>";
@@ -371,11 +372,18 @@ async function showRecord(key) {
 async function pointWitness(space, value, forcedIndex) {
   const report = ["inspect","records"].includes(models.tab) ? models.report : null;
   const index = forcedIndex ?? models.reportSource;
-  const id = report?.sources?.[index]?.id ?? models.active;
+  const merged = report?.metrics?.merged === true;
+  const id = report?.sources?.[index]?.id ?? models.report?.sources?.[0]?.id ?? models.active;
   if (!id) return;
   const url = report?.id ? "/api/records/"+report.id+"/probe" : "/api/sources/"+id+"/probe";
   const doc = {on:space,value,source_index:index};
-  if (report?.sources?.[index]?.revision) doc.expected_revision = report.sources[index].revision;
+  if (merged && space === "axis") {
+    doc.merged = true;
+    doc.sources = report.sources.map((s) => s.id);
+    doc.match_gain = report.metrics.brightness_matched !== false;
+  } else if (!report?.id && !merged && report?.sources?.[index]?.revision) {
+    doc.expected_revision = report.sources[index].revision;
+  }
   const response = await post(url,doc);
   models.lastPoint = space === "camera" ? value : response.reading.uv;
   models.witness = response;
@@ -415,11 +423,12 @@ async function stagePoint(event) {
   }
   const r = models.report;
   const probe = ["inspect","records"].includes(models.tab) && r ? r.probes?.[models.asset] : null;
-  if (probe?.kind === "axis") {
+  if (probe?.kind === "axis" || (probe?.kind === "merged-axis" && probe.x)) {
     const [left,top,right,bottom] = probe.plot_uv;
     if (uv[0] < left || uv[0] > right || uv[1] < top || uv[1] > bottom) return;
     return pointWitness("axis",probe.x[0]+(uv[0]-left)/(right-left)*(probe.x[1]-probe.x[0]));
   }
+  if (probe?.kind === "merged-axis") return;
   if (probe?.kind === "source-crop") {
     const [a,b,c,d] = probe.bounds;
     const meta = r.sources[probe.source_index].image;
@@ -486,7 +495,7 @@ const actions = {
     for(const item of models.folio)search.append("reading",item);
     window.open(studioPath()+"/folio?"+search.toString(),"_blank","noopener");
   },
-  "row-point":(key)=>pointWitness("camera",JSON.parse(key)),
+  "row-point":(key)=>{const p=JSON.parse(key);return pointWitness("camera",p.uv??p,p.source_index);},
   "row-axis":(key)=>pointWitness("axis",Number(key)),
   "strip-draw":()=>markDraw("strip"),
   "tool-draw":(key)=>markDraw("tool",key),

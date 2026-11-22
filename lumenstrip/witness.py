@@ -9,6 +9,7 @@ from PIL import Image, ImageDraw
 from .bench import Source
 from .camera import Camera, encode_png
 from .contracts import Problem, allowed, choice, identity, mapping, point, real, rounded, whole
+from .merge import merged_witness
 from .strip import Trace
 from .view import AMBER, CANVAS, CYAN, TEXT, annotate_loupe, font
 
@@ -20,11 +21,15 @@ class Request:
     radius: int
     source_index: int
     expected_revision: int | None = None
+    merged: bool = False
+    sources: tuple[str, ...] = ()
+    match_gain: bool = True
 
     @classmethod
     def parse(cls, value):
         data = mapping(value, "Witness request")
-        allowed(data, {"on", "value", "radius", "source_index", "expected_revision"}, "witness")
+        allowed(data, {"on", "value", "radius", "source_index", "expected_revision", "merged", "sources",
+                       "match_gain"}, "witness")
         space = choice(data.get("on", "camera"), ("camera", "axis"), "Witness coordinates")
         value = point(data.get("value"), "Position") if space == "camera" else (
             real(data.get("value"), "Axis position", 0, 26000))
@@ -33,7 +38,17 @@ class Request:
         revision = data.get("expected_revision")
         if revision is not None:
             revision = whole(revision, "Expected source version", 1, 1000000)
-        return cls(space, value, radius, chosen, revision)
+        merged = data.get("merged", False)
+        if type(merged) is not bool:
+            raise Problem("Merged witness flag must be true or false.")
+        gain = data.get("match_gain", True)
+        if type(gain) is not bool:
+            raise Problem("Brightness-matching flag must be true or false.")
+        raw = data.get("sources", [])
+        if not isinstance(raw, list) or len(raw) > 4:
+            raise Problem("Merged witness sources must be a list of up to four observations.")
+        return cls(space, value, radius, chosen, revision, merged,
+                   tuple(identity(v, "merged observation") for v in raw), gain)
 
 
 def saved_source(library, snapshot: dict) -> Source:
@@ -75,17 +90,38 @@ def _attach_header(original, title, reading):
     decoded.paste(original, (0, 48), original if original.mode == "RGBA" else None)
     draw = ImageDraw.Draw(decoded)
     draw.text((9, 7), title[:40], fill=TEXT, font=font(13))
-    pixel = reading["pixel"]
-    label = f"Original {pixel[0]}, {pixel[1]}  /  {'supported' if reading['supported'] else 'no camera support'}"
-    draw.text((9, 25), label, fill=CYAN if reading["supported"] else AMBER, font=font(11))
+    if "pixel" in reading:
+        pixel = reading["pixel"]
+        supported = reading.get("supported", True)
+        label = f"Original {pixel[0]}, {pixel[1]}  /  {'supported' if supported else 'no camera support'}"
+        fill = CYAN if supported else AMBER
+    else:
+        count = len(reading.get("contributors") or [])
+        label = f"{reading.get('sampled_axis', reading.get('requested_axis'))}  /  {count} contributing original(s)"
+        fill = CYAN if reading.get("state") == "merged" else AMBER
+    draw.text((9, 25), label, fill=fill, font=font(11))
     return decoded
 
 
 def replay(source: Source, request: Request):
-    if request.expected_revision is not None and source.record["revision"] != request.expected_revision:
+    return replay_sources((source,), request)
+
+
+def replay_sources(sources, request: Request):
+    """Resolve a witness against one source or against a set of merged exposures."""
+    multi = len(sources) > 1
+    if request.expected_revision is not None and any(
+            source.record["revision"] != request.expected_revision for source in sources):
         raise Problem("The source changed after this chart was drawn. Run the reading again.", 409)
     if request.space == "axis":
         axis = float(request.value)
+        if multi:
+            result, image = merged_witness(sources, {"match_gain": request.match_gain},
+                                           axis, request.radius)
+            if image is not None:
+                return result, encode_png(_attach_header(image, "Merged exposures", result))
+            return result, None
+        source = sources[0]
         trace = source.trace
         index = trace.interval(axis)
         if index is None:
@@ -95,12 +131,13 @@ def replay(source: Source, request: Request):
                     "state": trace.row(index)["state"], "strip": trace.config.public()}
     else:
         uv = request.value
+        source = sources[request.source_index % len(sources)]
         reading = source.camera.pixel(uv)
         index = _near_trace(source.trace, uv)
         decision = {**reading, "state": "camera pixel" if reading["supported"] else "no camera support",
                     "column_result": source.trace.row(index, exact=True) if index is not None else None}
         image = _supports_picture(source.camera, reading, request.radius)
-    decorated = _attach_header(image, source.title, decision)
+    decorated = _attach_header(image, "Merged exposures" if multi else source.title, decision)
     return {**decision, "source": source.public()}, encode_png(decorated)
 
 

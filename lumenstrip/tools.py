@@ -13,6 +13,7 @@ from .noise import noise_windows, sidebands
 from .continuum import envelopes, flatness, slope_edges
 from .instrument import dark_field, exposure_response, trace_placement
 from .comparison import band_comparison, drift, overlay, repeatability, transmission
+from .merge import merge_report
 from .readings import aperture, calibration_check, diagnostics, height_scan, spectrum, support_audit, tiles
 from .spectral import bands, crest_report, visible_balance
 
@@ -92,12 +93,19 @@ TOOLS = {tool.name: tool for tool in (
          "Read a selected native region and its statistics column by column.",
          (structured("window", "Image window", [[.28, .37], [.70, .62]], "crop"),
           select("channel", "Channel", "linear-luma", "linear-luma", "red", "green", "blue"), *GUARDS), aperture),
-    Tool("emission-lines", "Emission peaks", "Spectrum", 1, 1,
-         "Locate local peaks, observed line widths and supporting source columns.",
-         (number("shoulder", "Shoulder window", 16, 1, "columns"),
+    Tool("emission-lines", "Emission peaks", "Spectrum", 1, 4,
+         "Locate local peaks, observed line widths and supporting source columns."
+         " Selecting several exposures fuses them first.",
+         (boolean("match_gain", "Match overlap brightness when fusing", True),
+          number("shoulder", "Shoulder window", 16, 1, "columns"),
           number("contrast", "Minimum line contrast", .035, .005),
           number("spacing", "Minimum line spacing", 4, .25),
           number("maximum", "Maximum reported lines", 30)), crest_report),
+    Tool("merged-spectrum", "Merge exposures", "Spectrum", 2, 4,
+         "Fuse a long and a short exposure into one trace. Every position keeps the original"
+         " columns that built it; unsupported positions stay blank.",
+         (boolean("match_gain", "Match overlap brightness", True),
+          boolean("show_sources", "Show individual exposures", True)), merge_report),
     Tool("band-area", "Integrated bands", "Spectrum", 1, 1,
          "Integrate a defined band without bridging unmeasured wavelengths.",
          (BANDS, RATE), bands),

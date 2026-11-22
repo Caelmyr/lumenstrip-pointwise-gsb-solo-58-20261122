@@ -28,13 +28,19 @@ class Line:
         return self.crest - self.floor
 
     def row(self, number, trace: Trace):
+        point = trace.row(self.local_index)
+        origin = ([{"source": c["source"], "source_index": c["source_index"],
+                    "native_column": c["native_column"], "source_uv": c["source_uv"],
+                    "share": c["share"], "exposure_ms": c["exposure_ms"]}
+                   for c in point["contributors"]]
+                  if point.get("contributors") else None)
         return {"line": number, "position": rounded(self.position), "axis_units": trace.units,
                 "crest": rounded(self.crest), "local_contrast": rounded(self.contrast),
                 "half_height_low": rounded(self.low_shoulder), "half_height_high": rounded(self.high_shoulder),
                 "fwhm": rounded(self.high_shoulder - self.low_shoulder)
                 if self.low_shoulder is not None and self.high_shoulder is not None else None,
-                "source_uv": trace.row(self.local_index)["source_uv"],
-                "native_column": int(trace.plan.x[self.local_index])}
+                "source_uv": point["source_uv"], "native_column": int(point["column_px"]),
+                "source_index": point.get("source_index"), "origin": origin}
 
 
 def _cross_x(a, b, p, q, threshold):
@@ -100,10 +106,11 @@ def local_lines(t: Trace, window: int, contrast: float, spacing: float, maximum:
 
 
 def crest_report(bench):
-    s = bench.one()
-    t = s.trace
+    bench.require(1, 4)
+    merged = len(bench.sources) > 1
+    t = bench.trace()
     data = bench.order.settings
-    allowed(data, {"shoulder", "contrast", "spacing", "maximum"}, "line survey")
+    allowed(data, {"shoulder", "contrast", "spacing", "maximum", "match_gain"}, "line survey")
     span = whole(data.get("shoulder", 16), "Shoulder window (columns)", 3, 180)
     threshold = real(data.get("contrast", .035), "Minimum line contrast", 0, 2)
     distance = real(data.get("spacing", 4), "Minimum line spacing", .02, 230)
@@ -111,18 +118,28 @@ def crest_report(bench):
     lines = local_lines(t, span, threshold, distance, maximum)
     rows = [p.row(i + 1, t) for i, p in enumerate(lines)]
     result = Result("emission-lines", "Local emission line register",
-                    "Line crests are associated with camera coordinates and reported with local half-height shoulders where available.")
-    result.metrics = {"axis": t.units, "lines": len(lines),
+                    "Line crests are associated with camera coordinates and reported with local half-height shoulders where available."
+                    + (" Each line records the exposures that built the fused trace." if merged else ""))
+    result.metrics = {"axis": t.units, "lines": len(lines), "merged": merged,
                       "with_two_shoulders": sum(r["fwhm"] is not None for r in rows),
                       "strongest_position": rounded(max(lines, key=lambda a: a.contrast).position) if lines else None,
                       "minimum_contrast": threshold, "spacing": distance}
+    if merged:
+        result.metrics["merged_exposures"] = [source.title for source in bench.sources]
     result.rows = rows
     value = np.where(t.known, t.signal, np.nan)
-    result.chart("detected-lines", "Annotated light crests", plot(
-        "Emission line register", t.units, "Linear light", [Series("Camera spectrum", t.axis, value)],
-        markers=[(p.position, p.crest, str(i + 1)) for i, p in enumerate(lines)]))
-    result.image("line-strip", "Original strip under the crest chart", strip_overlay(s.camera, t),
-                 {"kind": "source", "source_index": 0})
+    chart = plot("Emission line register", t.units, "Linear light", [Series("Camera spectrum", t.axis, value)],
+                 markers=[(p.position, p.crest, str(i + 1)) for i, p in enumerate(lines)])
+    result.image("detected-lines", "Annotated light crests", chart.image,
+                 {"kind": "merged-axis", **chart.public()} if merged
+                 else {"kind": "axis", **chart.public()})
+    if merged:
+        for i, source in enumerate(bench.sources):
+            result.image(f"line-strip-{i + 1}", f"{source.title}: native strip under the crest chart",
+                         strip_overlay(source.camera, source.trace), {"kind": "source", "source_index": i})
+    else:
+        result.image("line-strip", "Original strip under the crest chart", strip_overlay(bench.sources[0].camera, t),
+                     {"kind": "source", "source_index": 0})
     result.csv("emission-line-register", "Positions and observed widths", rows)
     return result
 

@@ -24,7 +24,7 @@ from .proofs import camera_health, folio_page, record_health, studio_folio
 from .strip import Trace
 from .tools import TOOLS
 from .view import plot_anchor_view, strip_overlay
-from .witness import Request, bookmark_replay, replay, saved_source
+from .witness import Request, bookmark_replay, replay, replay_sources, saved_source
 
 
 def json_body(label):
@@ -246,7 +246,13 @@ def captures(app, lab, capacity):
     def probe_camera(key):
         selected = Request.parse(json_body("Camera witness"))
         with capacity:
-            result, image = replay(live_source(lab, key), selected)
+            if selected.merged:
+                sources = tuple(live_source(lab, part) for part in selected.sources)
+                if len(sources) < 2:
+                    raise Problem("A merged witness needs at least two observations.")
+                result, image = replay_sources(sources, selected)
+            else:
+                result, image = replay(live_source(lab, key), selected)
         return {"reading": result, "witness": base_image(image) if image is not None else None}
 
 
@@ -312,11 +318,19 @@ def reading(app, lab, capacity):
     def saved_probe(key):
         selected = Request.parse(json_body("Saved source witness"))
         record = lab.record(key)
-        try:
-            source = record["sources"][selected.source_index]
-        except IndexError:
-            raise Problem("The saved reading has no observation in that position.", 404) from None
         with capacity:
+            if selected.merged:
+                catalogue = {source["id"]: source for source in record["sources"]}
+                if any(part not in catalogue for part in selected.sources):
+                    raise Problem("That observation is not part of this saved reading.", 404)
+                wanted = [catalogue[part] for part in selected.sources]
+                sources = tuple(saved_source(lab, snapshot) for snapshot in wanted)
+                result, image = replay_sources(sources, selected)
+                return {"reading": result, "witness": base_image(image) if image is not None else None}
+            try:
+                source = record["sources"][selected.source_index]
+            except IndexError:
+                raise Problem("The saved reading has no observation in that position.", 404) from None
             result, image = replay(saved_source(lab, source), selected)
         return {"reading": result, "witness": base_image(image) if image is not None else None}
 

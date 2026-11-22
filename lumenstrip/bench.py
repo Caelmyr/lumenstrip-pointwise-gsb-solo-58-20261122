@@ -142,6 +142,17 @@ class Bench:
         resolved = tuple(Source.from_stored(library, *row) for row in sources)
         return cls(record, resolved, order)
 
+    @cached_property
+    def merged(self):
+        from .merge import fuse
+        if len(self.sources) < 2:
+            raise Problem("Merging needs at least two camera observations.")
+        return fuse(self.sources, {"match_gain": self.order.settings.get("match_gain", True)})
+
+    def trace(self):
+        """The single source trace, or a fused trace for a multi-exposure reading."""
+        return self.sources[0].trace if len(self.sources) == 1 else self.merged
+
     def one(self):
         if len(self.sources) != 1:
             raise Problem("Use a single camera observation for this tool.")
